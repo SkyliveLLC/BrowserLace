@@ -7,8 +7,9 @@ browsers), Firefox and Safari. Everything is end-to-end encrypted: the server st
 ciphertext and never sees a URL, title or collection name. Use the hosted server, or run
 your own on your tailnet.
 
-**Status: early release.** Bookmarks and tabs only. See [docs/architecture.md](docs/architecture.md)
-for how it works and what's deliberately left out.
+Bookmarks and tabs only, by design. See [docs/architecture.md](docs/architecture.md) for how
+it works and what's deliberately left out, [PRIVACY.md](PRIVACY.md) for what's stored, and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## How it works for users
 
@@ -56,6 +57,8 @@ End-to-end runs drive isolated browser profiles (never yours) against a throwawa
 
 ```sh
 pnpm build && pnpm --filter @browserlace/e2e chromium
+# Chromium ↔ Firefox (see e2e/firefox.ts for getting a throwaway Firefox ESR):
+FIREFOX_APP=<path to Firefox.app> pnpm --filter @browserlace/e2e firefox
 ```
 
 `pnpm --filter @browserlace/extension dev:firefox` does the same for Firefox. Set
@@ -104,6 +107,10 @@ docker build -f apps/server/Dockerfile -t browserlace-server .
 | `DATABASE_PATH` | `/data/browserlace.db`   | SQLite file (`browserlace.db` outside Docker)              |
 | `SIGNUP_TOKEN`  | unset                    | If set, creating an account requires it. Use it for invite-only servers. |
 | `HISTORY_DAYS`  | `365`                    | Changes older than this are dropped once a snapshot covers them; history and restore go back this far |
+| `TRUST_PROXY`   | unset                    | Header with the client IP behind a reverse proxy (`fly-client-ip`, `x-forwarded-for`), for rate limits |
+| `DEVICE_REQUESTS_PER_MINUTE` | `600`       | Per-device rate limit. Sign-ups and claims are limited to 10 a minute per IP |
+| `ACCESS_LOG`    | on                       | JSON access logs (method, path, status, ms) on stdout; `off` to disable |
+| `LITESTREAM_REPLICA_URL` | unset           | Continuous SQLite backups with [Litestream](https://litestream.io), e.g. `s3://bucket/browserlace`; restored automatically on an empty volume. S3 credentials in `LITESTREAM_ACCESS_KEY_ID` / `LITESTREAM_SECRET_ACCESS_KEY` |
 
 ### Billing (hosted service only)
 
@@ -122,8 +129,9 @@ Billing and plan limits turn on only when all four Stripe settings are set. With
 The webhook needs the events `checkout.session.completed` and `customer.subscription.created`,
 `.updated` and `.deleted`. Enable the customer portal in Stripe so people can manage or cancel.
 
-Put it behind HTTPS (any reverse proxy) for the hosted service. To self-host privately on
-a tailnet, see [deploy/tailscale](deploy/tailscale/README.md).
+Put it behind HTTPS (any reverse proxy). To self-host privately on a tailnet, see
+[deploy/tailscale](deploy/tailscale/README.md). The hosted service runs on Fly.io with
+backups and billing; see [deploy/fly](deploy/fly/README.md).
 
 ## License
 

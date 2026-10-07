@@ -5,10 +5,13 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
-    "chromium": "node chromium.ts"
+    "chromium": "node chromium.ts",
+    "firefox": "node firefox.ts"
   },
   "devDependencies": {
+    "@puppeteer/browsers": "^3.2.3",
     "@types/node": "^24.0.0",
-    "playwright-core": "^1.63.0"
+    "playwright-core": "^1.63.0",
+    "puppeteer-core": "^25.12.0"
   }
 }

@@ -161,3 +161,9 @@ export function pruneHistory(db: Database, cutoff: number): number {
   }
   return dropped;
 }
+
+/** Deletes pairing codes and sent tabs nobody redeemed in time. */
+export function cleanupExpired(db: Database, now: number, sendTtlMs: number) {
+  db.prepare("delete from pairings where expires_at <= ?").run(now);
+  db.prepare("delete from sends where created_at <= ?").run(now - sendTtlMs);
+}

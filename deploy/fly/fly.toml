@@ -1,0 +1,33 @@
+# The hosted BrowserLace server on Fly.io. See README.md in this folder before deploying.
+app = "browserlace"
+primary_region = "iad"
+
+[build]
+  image = "ghcr.io/skylivellc/browserlace-server:latest"
+
+[env]
+  TRUST_PROXY = "fly-client-ip"
+  PUBLIC_URL = "https://browserlace.fly.dev"
+
+# SQLite lives on this volume, so the app runs on exactly one machine.
+[[mounts]]
+  source = "browserlace_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  # Devices hold live WebSockets; keep the one machine running.
+  auto_stop_machines = "off"
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
