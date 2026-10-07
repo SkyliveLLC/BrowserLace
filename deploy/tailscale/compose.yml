@@ -21,6 +21,9 @@ services:
       dockerfile: apps/server/Dockerfile
     # Share the Tailscale container's network so `tailscale serve` can reach 127.0.0.1:8787.
     network_mode: service:tailscale
+    environment:
+      # `tailscale serve` passes the device's tailnet address here.
+      TRUST_PROXY: x-forwarded-for
     volumes:
       - data:/data
     restart: unless-stopped

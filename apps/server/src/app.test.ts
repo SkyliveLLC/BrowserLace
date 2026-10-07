@@ -348,3 +348,31 @@ describe("snapshots and retention", () => {
     expect(await push.json()).toEqual({ seq: 2 });
   });
 });
+
+describe("rate limits", () => {
+  it("limits sign-ups per client IP and requests per device", async () => {
+    let time = 0;
+    const app = createApp({
+      db: openDatabase(":memory:"),
+      now: () => time,
+      trustProxy: "x-forwarded-for",
+      rateLimits: { ip: { burst: 2, perMinute: 2 }, device: { burst: 3, perMinute: 60 } },
+    });
+    const client = testClient(app);
+    const signup = (ip: string) =>
+      client.v1.accounts.$post({ json: { name: "A", browser: "chrome" } }, { headers: { "x-forwarded-for": `10.0.0.9, ${ip}` } });
+
+    expect((await signup("1.1.1.1")).status).toBe(201);
+    const device = await (await signup("1.1.1.1")).json();
+    expect((await signup("1.1.1.1")).status).toBe(429);
+    expect((await signup("2.2.2.2")).status).toBe(201);
+    time += 30_000;
+    expect((await signup("1.1.1.1")).status).toBe(201);
+
+    const me = () => client.v1.me.$get({}, { headers: { authorization: `Bearer ${device.token}` } });
+    for (let i = 0; i < 3; i++) expect((await me()).status).toBe(200);
+    expect((await me()).status).toBe(429);
+    time += 1000;
+    expect((await me()).status).toBe(200);
+  });
+});

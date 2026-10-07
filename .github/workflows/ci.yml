@@ -45,5 +45,15 @@ jobs:
           for i in $(seq 30); do curl -fsS http://localhost:8787/healthz && exit 0; sleep 1; done
           docker logs server
           exit 1
+      - name: Back up with Litestream and restore onto an empty volume
+        run: |
+          mkdir -m 777 backup
+          docker run -d --name primary -p 8788:8787 -v "$PWD/backup:/backup" -e LITESTREAM_REPLICA_URL=file:///backup/db browserlace-server:ci
+          for i in $(seq 30); do curl -fsS http://localhost:8788/healthz && break; sleep 1; done
+          token=$(curl -fsS -X POST http://localhost:8788/v1/accounts -H 'content-type: application/json' -d '{"name":"ci","browser":"chrome"}' | jq -r .token)
+          sleep 3 && docker stop primary
+          docker run -d --name restored -p 8789:8787 -v "$PWD/backup:/backup" -e LITESTREAM_REPLICA_URL=file:///backup/db browserlace-server:ci
+          for i in $(seq 30); do curl -fsS http://localhost:8789/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8789/v1/me -H "authorization: Bearer $token" || { docker logs restored; exit 1; }
       - name: Validate the Tailscale compose file
         run: TS_AUTHKEY=ci docker compose -f deploy/tailscale/compose.yml config --quiet

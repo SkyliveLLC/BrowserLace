@@ -5,17 +5,21 @@
  * The extension imports `AppType` for a typed client (`hc<AppType>`).
  */
 import { upgradeWebSocket } from "@hono/node-server";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { zValidator } from "@hono/zod-validator";
 import { Hono, type ValidationTargets } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
+import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
+import { secureHeaders } from "hono/secure-headers";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { planFor, type Billing, type Plan, type Plans, type SubscriptionState } from "./billing.ts";
 import { transaction, type Database } from "./db.ts";
 import { Events } from "./events.ts";
+import { rateLimiter, type RateLimit } from "./ratelimit.ts";
 
 /** Validates a request part, answering 400 itself so error shapes stay out of the client types. */
 const valid = <Target extends keyof ValidationTargets, Schema extends z.ZodType>(target: Target, schema: Schema) =>
@@ -36,7 +40,7 @@ const grantBlob = z.string().max(65_536).regex(/^[\w-]{43}\.[\w-]+$/);
 const RECOVERY = "recovery";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
-const SEND_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const SEND_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PULL_PAGE = 500;
 
 type Device = { id: string; account_id: string };
@@ -61,9 +65,46 @@ export type AppOptions = {
   events?: Events;
   /** Paid plans. Without it there's no billing UI and no limits (self-hosting). */
   billing?: { provider: Billing; plans: Plans } | undefined;
+  /** Per client IP on sign-up and claim routes, and per device on everything else. */
+  rateLimits?: { ip: RateLimit; device: RateLimit };
+  /**
+   * Header carrying the client's IP when behind a reverse proxy (e.g. `fly-client-ip`,
+   * `x-forwarded-for`). Without it, the socket's address is used.
+   */
+  trustProxy?: string | undefined;
+  /** Called once per request, for access logs. Never given bodies or tokens. */
+  log?: (entry: { method: string; path: string; status: number; ms: number }) => void;
 };
 
-export function createApp({ db, signupToken, now = Date.now, events = new Events(), billing }: AppOptions) {
+export const defaultRateLimits = { ip: { burst: 20, perMinute: 10 }, device: { burst: 600, perMinute: 600 } };
+
+export function createApp({
+  db,
+  signupToken,
+  now = Date.now,
+  events = new Events(),
+  billing,
+  rateLimits = defaultRateLimits,
+  trustProxy,
+  log,
+}: AppOptions) {
+  const clientIp = (c: Context) => {
+    if (trustProxy) return c.req.header(trustProxy)?.split(",").at(-1)?.trim() ?? "unknown";
+    try {
+      return getConnInfo(c).remote.address ?? "unknown";
+    } catch {
+      return "unknown"; // Not a Node request (tests).
+    }
+  };
+  const ipLimit = rateLimiter(rateLimits.ip);
+  const deviceLimit = rateLimiter(rateLimits.device);
+  const tooMany = () => new HTTPException(429, { message: "Too many requests; try again in a minute" });
+  /** Guards routes anyone can call, which could otherwise be used to guess or spam. */
+  const perIp = createMiddleware(async (c, next) => {
+    if (!ipLimit(clientIp(c), now())) throw tooMany();
+    await next();
+  });
+
   const usage = (accountId: string) =>
     db
       .prepare(
@@ -121,6 +162,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
   const auth = createMiddleware<Env>(async (c, next) => {
     const device = deviceForToken(c.req.header("authorization")?.match(/^Bearer (.+)$/)?.[1]);
     if (!device) throw new HTTPException(401, { message: "Unknown or revoked device" });
+    if (!deviceLimit(device.id, now())) throw tooMany();
     db.prepare("update devices set last_seen_at = ? where id = ?").run(now(), device.id);
     c.set("device", device);
     await next();
@@ -136,6 +178,12 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
   const idParam = valid("param", z.object({ id: z.uuid() }));
 
   const app = new Hono<Env>()
+    .use(async (c, next) => {
+      const started = performance.now();
+      await next();
+      log?.({ method: c.req.method, path: c.req.path, status: c.res.status, ms: Math.round(performance.now() - started) });
+    })
+    .use(secureHeaders())
     // Clients authenticate with bearer tokens, never cookies, so any origin may call us.
     .use(cors())
     // Room for a snapshot of a very large collection; everything else is far smaller.
@@ -145,7 +193,10 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       console.error(err);
       return c.json({ error: "Internal error" }, 500);
     })
-    .get("/healthz", (c) => c.json({ ok: true }))
+    .get("/healthz", (c) => {
+      db.prepare("select 1").get();
+      return c.json({ ok: true });
+    })
 
     /** Stripe's webhook. Verified by signature, so it sits outside device auth. */
     .post("/billing/webhook", async (c) => {
@@ -169,7 +220,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       ),
     )
 
-    .post("/v1/accounts", valid("json", deviceInfo.extend({ signupToken: z.string().optional() })), (c) => {
+    .post("/v1/accounts", perIp, valid("json", deviceInfo.extend({ signupToken: z.string().optional() })), (c) => {
       const { signupToken: given, ...info } = c.req.valid("json");
       if (signupToken && given !== signupToken) throw new HTTPException(403, { message: "Signup token required" });
       const accountId = randomUUID();
@@ -179,6 +230,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
 
     .post(
       "/v1/pairings/claim",
+      perIp,
       valid("json", deviceInfo.extend({ lookupId })),
       (c) => {
         const { lookupId, ...info } = c.req.valid("json");
@@ -196,7 +248,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       },
     )
 
-    .post("/v1/recovery/claim", valid("json", deviceInfo.extend({ lookupId })), (c) => {
+    .post("/v1/recovery/claim", perIp, valid("json", deviceInfo.extend({ lookupId })), (c) => {
       const { lookupId, ...info } = c.req.valid("json");
       const recovery = db.prepare("select account_id from recovery where lookup_id = ?").get(lookupId) as
         | { account_id: string }
@@ -215,6 +267,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
      */
     .get(
       "/v1/events",
+      perIp,
       upgradeWebSocket(() => {
         let unsubscribe: (() => void) | undefined;
         return {
@@ -244,7 +297,6 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       const account = db.prepare("select key_epoch from accounts where id = ?").get(accountId) as { key_epoch: number };
       if (account.key_epoch !== epoch) throw new HTTPException(409, { message: "Keys changed; sync and try again" });
       const expiresAt = now() + PAIRING_TTL_MS;
-      db.prepare("delete from pairings where expires_at <= ?").run(now());
       db.prepare("insert into pairings (lookup_id, account_id, wrapped_key, expires_at, key_epoch) values (?, ?, ?, ?, ?)").run(
         lookupId,
         accountId,
@@ -662,7 +714,6 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       const accountId = c.var.device.account_id;
       const target = db.prepare("select 1 from devices where id = ? and account_id = ?").get(toDeviceId, accountId);
       if (!target) throw new HTTPException(404, { message: "Device not found" });
-      db.prepare("delete from sends where created_at <= ?").run(now() - SEND_TTL_MS);
       db.prepare(
         "insert into sends (id, account_id, to_device_id, from_device_id, blob, created_at) values (?, ?, ?, ?, ?, ?)",
       ).run(id, accountId, toDeviceId, c.var.device.id, blob, now());

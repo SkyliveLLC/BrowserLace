@@ -151,7 +151,11 @@ key); every device is listed in settings, so it would show there.
 ## Server (`apps/server`)
 
 Hono on Node 24 with the built-in `node:sqlite`, bundled into a single file. The same
-Docker image runs the hosted service and self-hosted instances. Tables: `accounts`,
+Docker image runs the hosted service and self-hosted instances. It's one process by
+design (SQLite, in-memory rate limits and live sockets), with Litestream for continuous
+backups when `LITESTREAM_REPLICA_URL` is set. Unauthenticated routes (sign-up, pairing
+and recovery claims, the live socket) are rate limited per client IP, everything else per
+device. A daily job prunes covered history and expired pairings and sends. Tables: `accounts`,
 `devices`, `collections`, `changes` (`collection_id, seq` primary key, seq assigned in
 one `insert … select max(seq) + 1` statement), `tabs`, `pairings`. CORS is open because
 clients authenticate with bearer tokens, not cookies.
@@ -185,7 +189,7 @@ Stripe sees the payment details people enter there; it never sees synced data.
 - Safari has no `bookmarks` API. The build omits the permission and the UI hides mounting,
   so collections are browsed from the popup instead.
 
-## Deliberately not in the MVP
+## Deliberately left out
 
 - History, passwords, cookies, extensions and settings sync.
 - Native Safari bookmarks (would need a macOS helper app using private APIs).

@@ -27,6 +27,9 @@ export async function startServer(): Promise<{ url: string; stop: () => void }> 
       STRIPE_PRICE_ID: "price_e2e",
       PUBLIC_URL: `http://localhost:${port}`,
       FREE_DEVICES: "10",
+      // The snapshot step syncs 500 times in a few seconds.
+      DEVICE_REQUESTS_PER_MINUTE: "100000",
+      ACCESS_LOG: "off",
     },
     stdio: "inherit",
   });
@@ -56,6 +59,13 @@ export const failed = () => failures > 0;
 
 export type Browser = Awaited<ReturnType<typeof launchChromium>>;
 
+/** The value of a background handler's reply (see lib/messages.ts), or its error thrown. */
+export function unwrapReply(reply: unknown): unknown {
+  const r = reply as { ok: true; value: unknown } | { ok: false; error: string };
+  if (!r.ok) throw new Error(r.error);
+  return r.value;
+}
+
 /** A fresh Chromium profile with the Chrome build loaded, on its options page. */
 export async function launchChromium(name: string) {
   const extension = join(root, "apps/extension/.output/chrome-mv3");
@@ -70,8 +80,8 @@ export async function launchChromium(name: string) {
   const page: Page = await context.newPage();
   page.on("pageerror", (e) => console.log(`[${name} pageerror]`, e.message));
   await page.goto(`chrome-extension://${id}/options.html`);
-  const call = (type: string, input?: unknown) =>
-    page.evaluate(([type, input]) => chrome.runtime.sendMessage({ type, input }), [type, input] as const);
+  const call = async (type: string, input?: unknown) =>
+    unwrapReply(await page.evaluate(([type, input]) => chrome.runtime.sendMessage({ type, input }), [type, input] as const));
   const storage = (key: string) => page.evaluate(async (key) => (await chrome.storage.local.get(key))[key], key);
   /** The bookmark folder titled `title` as indented lines, like the core tests' outline. */
   const bookmarks = (title: string) =>
