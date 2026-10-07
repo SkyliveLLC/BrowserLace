@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { generateKey, importKeyring, MissingKeyError, mergeKeyring } from "./crypto.ts";
-import { restoreCollection, TamperError, type MountMode } from "./sync.ts";
-import { Device, setup } from "./testing.ts";
+import { generateKey, importKeyring, MissingKeyError, mergeKeyring, type Keyring } from "./crypto.ts";
+import { restoreCollection, sealSnapshot, TamperError, type MountMode } from "./sync.ts";
+import { Device, setup, type FakeServer } from "./testing.ts";
 
 async function pair(mode: MountMode = "two-way") {
   const { server, keyring } = await setup();
@@ -370,5 +370,59 @@ describe("syncCollection", () => {
     const expected = ["Research/", "  Paper https://paper.example"];
     expect(a.browser.outline()).toEqual(expected);
     expect(b.browser.outline()).toEqual(expected);
+  });
+});
+
+describe("snapshots", () => {
+  /** A uploads a snapshot of its state, then the server drops the changes it covers. */
+  async function snapshotAndPrune(server: FakeServer, keyring: Keyring, a: Device) {
+    server.snapshots.set("c1", await sealSnapshot(keyring, "c1", a.collection));
+    server.prune("c1", a.collection.cursor);
+  }
+
+  it("starts a new device from the snapshot and keeps the chain going", async () => {
+    const { server, keyring, a, b } = await pair();
+    await a.browser.add("root", "one", "https://one.example");
+    await a.sync();
+    await a.browser.add("root", "two", "https://two.example");
+    await a.sync();
+    await snapshotAndPrune(server, keyring, a);
+
+    await a.browser.add("root", "three", "https://three.example");
+    await a.sync();
+    await b.sync();
+    expect(b.browser.outline()).toEqual(a.browser.outline());
+  });
+
+  it("catches up a device that was offline longer than the server keeps history", async () => {
+    const { server, keyring, a, b } = await pair();
+    await a.browser.add("root", "one", "https://one.example");
+    await a.sync();
+    await b.sync();
+    await b.browser.add("root", "offline edit", "https://offline.example");
+
+    await a.browser.add("root", "two", "https://two.example");
+    await a.sync();
+    await snapshotAndPrune(server, keyring, a);
+    await b.sync();
+    await a.sync();
+
+    // "two" and the offline edit were appended concurrently, so either order is fine.
+    expect(b.browser.outline().toSorted()).toEqual(["offline edit https://offline.example", "one https://one.example", "two https://two.example"]);
+    expect(a.browser.outline()).toEqual(b.browser.outline());
+  });
+
+  it("restores to points after the snapshot, but not before it", async () => {
+    const { server, keyring, a } = await pair();
+    await a.browser.add("root", "one", "https://one.example");
+    await a.sync();
+    await snapshotAndPrune(server, keyring, a);
+    await a.browser.add("root", "two", "https://two.example");
+    await a.sync();
+
+    await expect(restoreCollection({ collectionId: "c1", keyring, transport: server, beforeSeq: 1 })).rejects.toThrow(/older/);
+    await restoreCollection({ collectionId: "c1", keyring, transport: server, beforeSeq: 2 });
+    await a.sync({ allowDeletes: true });
+    expect(a.browser.outline()).toEqual(["one https://one.example"]);
   });
 });

@@ -56,6 +56,13 @@ devices compute the same model with no CRDT library:
 - A change that can't be decrypted or parsed (corruption, a newer client's format) is
   skipped and reported, not retried forever. Every device skips the same one.
 
+**Snapshots and retention.** After every 500 changes, a device uploads an encrypted
+snapshot of the replayed model (with the cursor and chain hash). A new device starts from
+it instead of replaying the whole log. The server drops changes that a snapshot covers
+once they're older than `HISTORY_DAYS` (365 by default); a device whose cursor is older
+than that gets `410 Gone` and continues from the snapshot, keeping its mounted folder's
+local edits. History and restore then start at the snapshot.
+
 Because deleted nodes keep their fields, **restore** is just a diff: replay the log up to
 a point, compare with the current model and push the ops that turn one into the other.
 History is never rewritten, so a restore can be undone too.
@@ -173,7 +180,6 @@ The extension imports the server's route types (`AppType`) for a fully typed cli
 
 - History, passwords, cookies, extensions and settings sync.
 - Native Safari bookmarks (would need a macOS helper app using private APIs).
-- Log compaction: new devices replay the full log, which is fine at bookmark scale.
 - Rate limiting and billing on the server. `SIGNUP_TOKEN` gates signups for now.
 - Smarter folder matching on mount: a folder renamed in one browser before mounting comes
   through as a second folder (its bookmarks are still matched by URL, not duplicated).

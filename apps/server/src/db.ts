@@ -91,6 +91,15 @@ const migrations = [
   );
   create index sends_to on sends(to_device_id);
   `,
+  `
+  create table snapshots (
+    collection_id text primary key references collections(id) on delete cascade,
+    seq integer not null,
+    blob text not null,
+    created_at integer not null
+  );
+  alter table collections add column pruned_seq integer not null default 0;
+  `,
 ];
 
 export type Database = DatabaseSync;
@@ -121,4 +130,27 @@ export function transaction<T>(db: Database, fn: () => T): T {
     db.exec("rollback");
     throw error;
   }
+}
+
+/**
+ * Drops changes older than `cutoff` that a snapshot already covers, so the log doesn't
+ * grow forever. History (and restore) then starts at the snapshot. Returns how many
+ * changes were dropped.
+ */
+export function pruneHistory(db: Database, cutoff: number): number {
+  const candidates = db
+    .prepare(
+      `select s.collection_id as id, min(s.seq, coalesce(max(ch.seq), 0)) as through
+       from snapshots s join changes ch on ch.collection_id = s.collection_id and ch.created_at < ?
+       group by s.collection_id`,
+    )
+    .all(cutoff) as { id: string; through: number }[];
+  let dropped = 0;
+  for (const { id, through } of candidates) {
+    transaction(db, () => {
+      dropped += Number(db.prepare("delete from changes where collection_id = ? and seq <= ?").run(id, through).changes);
+      db.prepare("update collections set pruned_seq = max(pruned_seq, ?) where id = ?").run(through, id);
+    });
+  }
+  return dropped;
 }

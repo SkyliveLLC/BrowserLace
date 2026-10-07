@@ -5,20 +5,21 @@ import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { createApp } from "./app.ts";
-import { openDatabase } from "./db.ts";
+import { openDatabase, pruneHistory } from "./db.ts";
 
 const LOOKUP = "a".repeat(43);
 
 function setup(options: { signupToken?: string } = {}) {
   let time = 1_000_000;
-  const app = createApp({ db: openDatabase(":memory:"), now: () => time, ...options });
+  const db = openDatabase(":memory:");
+  const app = createApp({ db, now: () => time, ...options });
   const client = testClient(app);
   const as = (token: string) => ({ headers: { authorization: `Bearer ${token}` } });
   const signup = async () => {
     const res = await client.v1.accounts.$post({ json: { name: "Chrome on Mac", browser: "chrome" } });
     return res.json();
   };
-  return { client, as, signup, advance: (ms: number) => (time += ms) };
+  return { db, client, as, signup, advance: (ms: number) => (time += ms), now: () => time };
 }
 
 describe("accounts and devices", () => {
@@ -303,5 +304,47 @@ describe("live events", () => {
     mine.socket.close();
     theirs.socket.close();
     server.close();
+  });
+});
+
+describe("snapshots and retention", () => {
+  it("prunes old changes a snapshot covers, and sends older cursors to the snapshot", async () => {
+    const { db, client, as, signup, advance, now } = setup();
+    const { token } = await signup();
+    const id = randomUUID();
+    await client.v1.collections.$post({ json: { id, meta: "meta" } }, as(token));
+    const push = (head: number) => client.v1.collections[":id"].changes.$post({ param: { id }, json: { blob: `c${head}`, head } }, as(token));
+    for (let head = 0; head < 3; head++) await push(head);
+    const snapshot = (seq: number, blob: string) => client.v1.collections[":id"].snapshot.$put({ param: { id }, json: { seq, blob } }, as(token));
+
+    expect((await snapshot(4, "ahead")).status).toBe(400);
+    await snapshot(2, "at2");
+    await snapshot(1, "older");
+    expect(await (await client.v1.collections[":id"].snapshot.$get({ param: { id } }, as(token))).json()).toEqual({ snapshot: { seq: 2, blob: "at2" } });
+
+    advance(1000);
+    await push(3);
+    expect(pruneHistory(db, now() - 500)).toBe(2);
+
+    const pull = (after: number) => client.v1.collections[":id"].changes.$get({ param: { id }, query: { after: String(after) } }, as(token));
+    expect((await pull(0)).status).toBe(410);
+    expect((await (await pull(2)).json()).changes.map((c) => c.seq)).toEqual([3, 4]);
+    expect((await push(4)).status).toBe(201);
+    const { collections } = await (await client.v1.collections.$get({}, as(token))).json();
+    expect(collections[0]).toMatchObject({ headSeq: 5, snapshotSeq: 2 });
+  });
+
+  it("keeps changing after the whole log is pruned", async () => {
+    const { db, client, as, signup, advance, now } = setup();
+    const { token } = await signup();
+    const id = randomUUID();
+    await client.v1.collections.$post({ json: { id, meta: "meta" } }, as(token));
+    await client.v1.collections[":id"].changes.$post({ param: { id }, json: { blob: "c0", head: 0 } }, as(token));
+    await client.v1.collections[":id"].snapshot.$put({ param: { id }, json: { seq: 1, blob: "s" } }, as(token));
+    advance(1000);
+    pruneHistory(db, now());
+
+    const push = await client.v1.collections[":id"].changes.$post({ param: { id }, json: { blob: "c1", head: 1 } }, as(token));
+    expect(await push.json()).toEqual({ seq: 2 });
   });
 });

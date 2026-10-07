@@ -33,7 +33,12 @@ export function check(label: string, actual: unknown, expected: unknown) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
   console.log(`${ok ? "PASS" : "FAIL"} ${label}`);
   if (!ok) {
-    console.log("  expected", expected, "\n  actual  ", actual);
+    if (Array.isArray(actual) && Array.isArray(expected)) {
+      const at = expected.findIndex((line, i) => JSON.stringify(line) !== JSON.stringify(actual[i]));
+      console.log(`  lengths ${expected.length} vs ${actual.length}; first difference at ${at}:`, expected[at], "vs", actual[at]);
+    } else {
+      console.log("  expected", expected, "\n  actual  ", actual);
+    }
     failures++;
   }
 }

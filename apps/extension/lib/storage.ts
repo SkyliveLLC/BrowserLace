@@ -16,7 +16,7 @@ export type Config = {
 
 export type MountConfig = { folderId: string; mode: MountMode; paused?: Pause };
 
-export type CollectionSummary = { id: string; name: string; headSeq: number };
+export type CollectionSummary = { id: string; name: string; headSeq: number; snapshotSeq: number };
 
 export type Status = {
   lastSyncAt?: number;

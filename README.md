@@ -103,6 +103,7 @@ docker build -f apps/server/Dockerfile -t browserlace-server .
 | `PORT`          | `8787`                   | HTTP port                                                  |
 | `DATABASE_PATH` | `/data/browserlace.db`   | SQLite file (`browserlace.db` outside Docker)              |
 | `SIGNUP_TOKEN`  | unset                    | If set, creating an account requires it. Use it for invite-only servers. |
+| `HISTORY_DAYS`  | `365`                    | Changes older than this are dropped once a snapshot covers them; history and restore go back this far |
 
 Put it behind HTTPS (any reverse proxy) for the hosted service. To self-host privately on
 a tailnet, see [deploy/tailscale](deploy/tailscale/README.md).

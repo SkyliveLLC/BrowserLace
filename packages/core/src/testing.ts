@@ -1,7 +1,15 @@
 /** In-memory browser and server used by the sync tests. Not exported from the package. */
 import { createKeyring, importKeyring, type Keyring } from "./crypto.ts";
 import { emptyMountState, type MountState, type NativeBookmarks, type NativeNode } from "./reconcile.ts";
-import { emptyCollectionState, syncCollection, type Change, type CollectionState, type MountMode, type Transport } from "./sync.ts";
+import {
+  emptyCollectionState,
+  PrunedError,
+  syncCollection,
+  type Change,
+  type CollectionState,
+  type MountMode,
+  type Transport,
+} from "./sync.ts";
 
 type FakeNode = { id: string; title: string; url?: string; parentId: string | null; children: string[] };
 
@@ -100,6 +108,9 @@ export class FakeBrowser implements NativeBookmarks {
 
 export class FakeServer implements Transport {
   logs = new Map<string, Change[]>();
+  snapshots = new Map<string, string>();
+  /** Highest seq dropped from each log by `prune`. */
+  pruned = new Map<string, number>();
   /** Runs right before a push lands, to simulate another device racing it. */
   beforePush?: () => Promise<void>;
 
@@ -108,14 +119,27 @@ export class FakeServer implements Transport {
     this.beforePush = undefined;
     await race?.();
     const log = this.logs.get(collectionId) ?? [];
-    if (log.length !== head) return false;
-    log.push({ seq: log.length + 1, deviceId: "test", createdAt: Date.now(), blob });
+    const last = log.at(-1)?.seq ?? this.pruned.get(collectionId) ?? 0;
+    if (last !== head) return false;
+    log.push({ seq: last + 1, deviceId: "test", createdAt: Date.now(), blob });
     this.logs.set(collectionId, log);
     return true;
   }
 
   async pull(collectionId: string, after: number) {
+    if (after < (this.pruned.get(collectionId) ?? 0)) throw new PrunedError();
     return (this.logs.get(collectionId) ?? []).filter((c) => c.seq > after);
+  }
+
+  async snapshot(collectionId: string) {
+    const blob = this.snapshots.get(collectionId);
+    return blob ? { blob } : null;
+  }
+
+  /** Drops changes up to `seq`, like the server's history retention. */
+  prune(collectionId: string, seq: number) {
+    this.logs.set(collectionId, (this.logs.get(collectionId) ?? []).filter((c) => c.seq > seq));
+    this.pruned.set(collectionId, seq);
   }
 }
 

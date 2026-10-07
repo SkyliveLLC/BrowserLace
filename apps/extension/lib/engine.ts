@@ -26,7 +26,9 @@ import {
   recoverySetup,
   restoreCollection,
   rotateKeys,
+  PrunedError,
   seal,
+  sealSnapshot,
   sendPayload,
   syncCollection,
   tabsSnapshot,
@@ -58,6 +60,9 @@ import {
 } from "./storage.ts";
 import { captureTabs } from "./tabs.ts";
 
+/** Changes between snapshots. Replaying this many on a new device is quick. */
+const SNAPSHOT_EVERY = 500;
+
 let queue: Promise<unknown> = Promise.resolve();
 
 /** Runs `task` after everything queued before it. */
@@ -86,11 +91,11 @@ async function session({ refresh = false } = {}) {
 async function readCollections(api: Api, keyring: Keyring): Promise<CollectionSummary[]> {
   const { collections } = await unwrap(api.v1.collections.$get());
   return Promise.all(
-    collections.map(async ({ id, meta, headSeq }) => {
+    collections.map(async ({ id, meta, headSeq, snapshotSeq }) => {
       const name = await open(keyring, meta, contexts.meta(id), collectionMeta)
         .then((m) => m.name)
         .catch(() => "(unreadable)");
-      return { id, name, headSeq };
+      return { id, name, headSeq, snapshotSeq };
     }),
   );
 }
@@ -221,6 +226,14 @@ async function syncAll(resolution?: Resolution) {
             (resolution.deletes === "allow" ? { allowDeletes: true } : { discardDeletes: true })),
         });
         await collectionStateItem(c.id).setValue(result.collection);
+        // Every so often, snapshot the collection so new devices (and the server's history pruning) can start there.
+        if (result.collection.cursor - c.snapshotSeq >= SNAPSHOT_EVERY) {
+          const blob = await sealSnapshot(keyring, c.id, result.collection);
+          // Best effort: another device can upload it if this fails.
+          await unwrap(api.v1.collections[":id"].snapshot.$put({ param: { id: c.id }, json: { seq: result.collection.cursor, blob } })).catch(
+            () => {},
+          );
+        }
         if (mount) {
           if (result.mount) await mountStateItem(c.id).setValue(result.mount);
           mounts[c.id] = { folderId: mount.folderId, mode: mount.mode, ...(result.paused ? { paused: result.paused } : {}) };
@@ -501,8 +514,14 @@ export const handlers = {
 
   history: async (input: { collectionId: string }) => {
     const { api, keyring } = await session();
+    // When old changes were pruned, history (and restoring) starts at the snapshot.
+    const pullFrom = (after: number) => transport(api).pull(input.collectionId, after);
+    const snapshotSeq = (await collectionsItem.getValue()).find((c) => c.id === input.collectionId)?.snapshotSeq ?? 0;
     const [changes, me] = await Promise.all([
-      transport(api).pull(input.collectionId, 0),
+      pullFrom(0).catch((error: unknown) => {
+        if (error instanceof PrunedError) return pullFrom(snapshotSeq);
+        throw error;
+      }),
       unwrap(api.v1.me.$get()),
     ]);
     const names = new Map(me.devices.map((d) => [d.id, d.name]));
