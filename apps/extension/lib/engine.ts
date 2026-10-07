@@ -17,7 +17,10 @@ import {
   normalizePairingCode,
   open,
   openChange,
+  pairingLink,
   pairingLookupId,
+  parsePairingInput,
+  profilePayload,
   recoveryIdentity,
   recoverySetup,
   restoreCollection,
@@ -314,17 +317,19 @@ export const handlers = {
       await saveConfig(input, createKeyring(), device);
     }),
 
+  /** Joins with a pairing code, or a pairing link (which also carries the server URL). */
   joinAccount: (input: { serverUrl: string; code: string; deviceName: string }) =>
     exclusive(async () => {
-      if (!normalizePairingCode(input.code)) throw new Error("That doesn't look like a pairing code");
-      const api = createApi(input.serverUrl);
+      const { code, serverUrl = input.serverUrl } = parsePairingInput(input.code);
+      if (!normalizePairingCode(code)) throw new Error("That doesn't look like a pairing code or link");
+      const api = createApi(serverUrl);
       const claimed = await unwrap(
         api.v1.pairings.claim.$post({
-          json: { lookupId: await pairingLookupId(input.code), name: input.deviceName, browser: browserName() },
+          json: { lookupId: await pairingLookupId(code), name: input.deviceName, browser: browserName() },
         }),
       );
       const { wrappedKey, ...device } = claimed;
-      await saveConfig(input, await unwrapKeyring(input.code, wrappedKey), device);
+      await saveConfig({ ...input, serverUrl }, await unwrapKeyring(code, wrappedKey), device);
     }),
 
   /** Signs this browser in with a recovery key, when no other device is left to pair with. */
@@ -344,7 +349,7 @@ export const handlers = {
       const code = generatePairingCode();
       const wrapped = await wrapKeyring(code, keyring.stored);
       const { expiresAt } = await unwrap(api.v1.pairings.$post({ json: { ...wrapped, epoch: keyring.current } }));
-      return { code, expiresAt, serverUrl: config.serverUrl };
+      return { code, expiresAt, serverUrl: config.serverUrl, link: pairingLink(config.serverUrl, code) };
     }),
 
   /** Creates (or replaces) the account's recovery key and returns it, to be shown once. */
@@ -403,6 +408,58 @@ export const handlers = {
       await mountsItem.setValue(mounts);
       await mountStateItem(input.collectionId).removeValue();
     }),
+
+  profiles: async () => {
+    const { api, keyring } = await session();
+    const { profiles } = await unwrap(api.v1.profiles.$get());
+    const opened = await Promise.all(
+      profiles.map(({ id, blob }) =>
+        open(keyring, blob, contexts.profile(id), profilePayload).then(
+          (profile) => ({ id, ...profile }),
+          () => null,
+        ),
+      ),
+    );
+    return opened.filter((p) => p !== null);
+  },
+
+  /** Saves this browser's mounts as a named profile other browsers can apply. */
+  saveProfile: (input: { name: string }) =>
+    exclusive(async () => {
+      const { api, keyring } = await session({ refresh: true });
+      const rules = await Promise.all(
+        Object.entries(await mountsItem.getValue()).map(async ([collectionId, mount]) => ({
+          collectionId,
+          mode: mount.mode,
+          folderTitle: (await browser.bookmarks.get(mount.folderId).catch(() => []))[0]?.title ?? "BrowserLace",
+        })),
+      );
+      if (rules.length === 0) throw new Error("Sync at least one collection to a folder first");
+      const id = crypto.randomUUID();
+      const blob = await seal(keyring, { v: 1, name: input.name, rules }, contexts.profile(id));
+      await unwrap(api.v1.profiles[":id"].$put({ param: { id }, json: { blob } }));
+    }),
+
+  /** Mounts every collection in a profile that isn't synced here yet, each into a new folder. */
+  applyProfile: (input: { profileId: string }) =>
+    exclusive(async () => {
+      const { api, keyring } = await session();
+      const row = (await unwrap(api.v1.profiles.$get())).profiles.find((p) => p.id === input.profileId);
+      if (!row) throw new Error("That profile was deleted");
+      const profile = await open(keyring, row.blob, contexts.profile(row.id), profilePayload);
+      const collections = await collectionsItem.getValue();
+      const mounts = await mountsItem.getValue();
+      for (const rule of profile.rules) {
+        if (mounts[rule.collectionId] || !collections.some((c) => c.id === rule.collectionId)) continue;
+        await mountCollection(rule.collectionId, rule.folderTitle, "new", rule.mode);
+      }
+      await syncAll();
+    }),
+
+  deleteProfile: async (input: { profileId: string }) => {
+    const { api } = await session();
+    await unwrap(api.v1.profiles[":id"].$delete({ param: { id: input.profileId } }));
+  },
 
   history: async (input: { collectionId: string }) => {
     const { api, keyring } = await session();

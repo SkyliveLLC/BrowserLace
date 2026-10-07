@@ -304,6 +304,19 @@ export async function applyTree(
   return { skipped, baseline };
 }
 
+/**
+ * The model's own tree in baseline form. Diffing a folder against this instead of its
+ * last-synced baseline yields the ops that make the model match the folder exactly,
+ * which is how send-only mounts overwrite edits other devices made.
+ */
+export function modelBaseline(tree: TreeNode): Record<string, BaselineEntry> {
+  const baseline: Record<string, BaselineEntry> = {};
+  for (const { node, parent } of walk(tree)) {
+    baseline[node.id] = { parent: parent.id, title: node.title, url: node.url, index: parent.children.indexOf(node), pos: node.pos };
+  }
+  return baseline;
+}
+
 /** Records the native folder, in sync-id space, as the baseline for the next sync. */
 export function readBaseline(
   root: NativeNode,

@@ -44,12 +44,15 @@ export function Alerts({ onOpenSettings }: { onOpenSettings?: () => void }) {
           );
         }
         const local = paused.reason === "local-deletes";
+        const send = mount.mode === "send";
         return (
           <Notice key={id} tone="warning">
             <p>
-              {local
-                ? `You deleted ${paused.count} bookmarks from “${name(id)}”. Delete them on your other devices too?`
-                : `Syncing “${name(id)}” would remove ${paused.count} bookmarks from this browser.`}
+              {send
+                ? `Sending this folder would delete ${paused.count} bookmarks from “${name(id)}” on your other devices. Go ahead?`
+                : local
+                  ? `You deleted ${paused.count} bookmarks from “${name(id)}”. Delete them on your other devices too?`
+                  : `Syncing “${name(id)}” would remove ${paused.count} bookmarks from this browser.`}
             </p>
             <div className="row">
               <button
@@ -58,7 +61,7 @@ export function Alerts({ onOpenSettings }: { onOpenSettings?: () => void }) {
               >
                 {local ? "Delete everywhere" : "Remove them"}
               </button>
-              {local && (
+              {local && !send && (
                 <button
                   disabled={action.pending}
                   onClick={() => action.run(() => call("discardDeletes", { collectionId: id }))}

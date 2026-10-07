@@ -13,9 +13,12 @@ for how it works and what's deliberately left out.
 ## How it works for users
 
 - **Collections** are sets of bookmarks you choose to sync, like "Work" or "Research".
-- Each browser decides which collections it syncs and into which folder, either **two-way**
-  or **receive only**. A work laptop can receive "Personal" and edit "Work"; a home PC
-  might never see "Work".
+- Each browser decides which collections it syncs and into which folder: **two-way**,
+  **receive only** or **send only** (this browser's folder is the source of truth). A work
+  laptop can receive "Personal" and edit "Work"; a home PC might never see "Work".
+- **Profiles** save a browser's setup ("Work laptop") so a new browser applies it in one step.
+- **Pairing** a new browser takes a one-time code, link or QR code. The popup searches every
+  collection, which is how Safari reaches them.
 - **Other devices** in the toolbar popup shows each browser's open tabs, so you can pick
   up where you left off without merging every session together.
 - **Safety:** large deletions pause until you confirm, and every collection keeps a

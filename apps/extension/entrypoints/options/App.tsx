@@ -1,7 +1,8 @@
 import type { MountMode } from "@browserlace/core";
 import { useEffect, useState, type FormEvent } from "react";
 import { Alerts } from "../../components/Alerts.tsx";
-import { ErrorText, Logo, Notice, timeAgo, useAction, useStored } from "../../components/ui.tsx";
+import { Qr } from "../../components/Qr.tsx";
+import { ErrorText, Logo, Notice, modeLabel, timeAgo, useAction, useStored } from "../../components/ui.tsx";
 import { folderPath, hasBookmarksApi, listFolders, type FolderOption } from "../../lib/bookmarks.ts";
 import type { Handlers } from "../../lib/engine.ts";
 import { call } from "../../lib/messages.ts";
@@ -25,6 +26,7 @@ export function App() {
         <>
           <Alerts />
           <Collections />
+          {hasBookmarksApi() && <Profiles />}
           <Devices />
           <RecoveryKey />
           <ThisBrowser />
@@ -88,7 +90,7 @@ function Onboarding() {
           <p className="muted">On a browser that's already set up, open settings → Devices → Pair a device.</p>
           {fields}
           <label>
-            Pairing code
+            Pairing code or link
             <input name="code" required placeholder="XXXX-XXXX-XXXX-XXXX" autoComplete="off" spellCheck={false} />
           </label>
           <button className="primary" disabled={join.pending}>
@@ -154,6 +156,7 @@ function MountFields({ newFolderLabel }: { newFolderLabel: string }) {
         <select name="mode" defaultValue="two-way">
           <option value="two-way">Two-way</option>
           <option value="receive">Receive only</option>
+          <option value="send">Send only</option>
         </select>
       </label>
     </div>
@@ -223,7 +226,7 @@ function CollectionCard({ collection }: { collection: CollectionSummary }) {
     <div className="card stack">
       <div className="row">
         <h3>{collection.name}</h3>
-        {mount && <span className="tag">{mount.mode === "two-way" ? "Two-way" : "Receive only"}</span>}
+        {mount && <span className="tag">{modeLabel[mount.mode]}</span>}
         <span className="spacer" />
         <button
           className="ghost"
@@ -271,6 +274,7 @@ function CollectionCard({ collection }: { collection: CollectionSummary }) {
           <MountFields newFolderLabel={`New folder “${collection.name}” in Other Bookmarks`} />
           <p className="muted">
             Two-way merges a folder's existing bookmarks into the collection. Receive only needs a new or empty folder.
+            Send only makes the collection match this folder, undoing edits made elsewhere.
           </p>
           <div className="row">
             <button className="primary" disabled={mountAction.pending}>
@@ -378,7 +382,9 @@ function Devices() {
   );
 }
 
-function PairingCode({ pairing, onDone }: { pairing: { code: string; expiresAt: number; serverUrl: string }; onDone: () => void }) {
+type Pairing = Awaited<ReturnType<Handlers["createPairingCode"]>>;
+
+function PairingCode({ pairing, onDone }: { pairing: Pairing; onDone: () => void }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -387,15 +393,23 @@ function PairingCode({ pairing, onDone }: { pairing: { code: string; expiresAt: 
   const left = Math.max(0, Math.round((pairing.expiresAt - now) / 1000));
   return (
     <Notice>
-      <p>On the new browser, install BrowserLace, choose “Add this browser” and enter:</p>
-      <p>
-        Server: <strong>{pairing.serverUrl}</strong>
-      </p>
-      <div className="row">
-        <span className="code">{pairing.code}</span>
-        <button className="ghost" onClick={() => void navigator.clipboard.writeText(pairing.code)}>
-          Copy
-        </button>
+      <div className="row" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+        <Qr text={pairing.link} />
+        <div className="stack" style={{ flex: 1, minWidth: 240 }}>
+          <p>
+            On the new browser, install BrowserLace, choose “Add this browser” and paste the pairing link, or scan the
+            code with your phone. Or enter the server <strong>{pairing.serverUrl}</strong> and this code:
+          </p>
+          <span className="code">{pairing.code}</span>
+          <div className="row">
+            <button className="ghost" onClick={() => void navigator.clipboard.writeText(pairing.link)}>
+              Copy link
+            </button>
+            <button className="ghost" onClick={() => void navigator.clipboard.writeText(pairing.code)}>
+              Copy code
+            </button>
+          </div>
+        </div>
       </div>
       <div className="row">
         <span className="muted">
@@ -405,6 +419,81 @@ function PairingCode({ pairing, onDone }: { pairing: { code: string; expiresAt: 
         <button onClick={onDone}>Done</button>
       </div>
     </Notice>
+  );
+}
+
+type Profile = Awaited<ReturnType<Handlers["profiles"]>>[number];
+
+/** Saved sets of mounts, so a new browser can sync the right collections in one step. */
+function Profiles() {
+  const [profiles, setProfiles] = useState<Profile[]>();
+  const mounts = useStored(mountsItem) ?? {};
+  const collections = useStored(collectionsItem) ?? [];
+  const load = useAction(async () => setProfiles(await call("profiles")));
+  const save = useAction(async (f: Record<string, string>, form: HTMLFormElement) => {
+    await call("saveProfile", { name: f.name! });
+    form.reset();
+    await load.run();
+  });
+  const action = useAction(async (run: () => Promise<unknown>) => {
+    await run();
+    await load.run();
+  });
+  useEffect(() => void load.run(), []);
+  const name = (id: string) => collections.find((c) => c.id === id)?.name ?? "Deleted collection";
+
+  return (
+    <section className="stack">
+      <h2>Profiles</h2>
+      <p className="muted">
+        A profile remembers which collections a browser syncs and how, like “Work laptop”. Apply it on a new browser to
+        set it up in one step.
+      </p>
+      {profiles?.map((profile) => {
+        const pending = profile.rules.filter((r) => !mounts[r.collectionId] && collections.some((c) => c.id === r.collectionId));
+        return (
+          <div key={profile.id} className="card stack">
+            <div className="row">
+              <h3>{profile.name}</h3>
+              <span className="spacer" />
+              <button className="primary" disabled={action.pending || pending.length === 0} onClick={() => action.run(() => call("applyProfile", { profileId: profile.id }))}>
+                {pending.length === 0 ? "Applied" : "Apply here"}
+              </button>
+              <button
+                className="ghost danger"
+                onClick={() => {
+                  if (confirm(`Delete the profile “${profile.name}”? Nothing already synced changes.`)) {
+                    void action.run(() => call("deleteProfile", { profileId: profile.id }));
+                  }
+                }}
+              >
+                Delete
+              </button>
+            </div>
+            <ul className="list">
+              {profile.rules.map((rule) => (
+                <li key={rule.collectionId} className="row item">
+                  <span className="title">{name(rule.collectionId)}</span>
+                  <span className="tag">{modeLabel[rule.mode]}</span>
+                  <span className="muted">into “{rule.folderTitle}”</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+      <form
+        className="card row"
+        onSubmit={(event) => {
+          const form = event.currentTarget;
+          onSubmit((f) => save.run(f, form))(event);
+        }}
+      >
+        <input name="name" required placeholder="Work laptop, Home…" aria-label="Profile name" style={{ flex: 1 }} />
+        <button disabled={save.pending || Object.keys(mounts).length === 0}>Save this browser's setup</button>
+      </form>
+      <ErrorText error={load.error ?? save.error ?? action.error} />
+    </section>
   );
 }
 

@@ -43,9 +43,21 @@ export const tabsSnapshot = z.object({
 });
 export type TabsSnapshot = z.output<typeof tabsSnapshot>;
 
+/**
+ * A named set of mounts to set up a new browser in one step, e.g. "Work laptop":
+ * "Personal" received into a folder called Personal, "ACME" two-way.
+ */
+export const profilePayload = z.object({
+  v: z.literal(1),
+  name: z.string().min(1),
+  rules: z.array(z.object({ collectionId: z.string(), mode: z.enum(["two-way", "receive", "send"]), folderTitle: z.string() })),
+});
+export type Profile = z.output<typeof profilePayload>;
+
 /** Additional-data contexts that bind each blob to where it's stored. */
 export const contexts = {
   change: (collectionId: string) => `change:${collectionId}`,
   meta: (collectionId: string) => `meta:${collectionId}`,
   tabs: (deviceId: string) => `tabs:${deviceId}`,
+  profile: (profileId: string) => `profile:${profileId}`,
 };

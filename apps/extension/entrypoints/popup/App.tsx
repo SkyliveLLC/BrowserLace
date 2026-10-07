@@ -1,3 +1,4 @@
+import { buildTree, walk } from "@browserlace/core";
 import { useEffect, useState } from "react";
 import { browser } from "wxt/browser";
 import { Alerts } from "../../components/Alerts.tsx";
@@ -5,7 +6,7 @@ import { CollectionTree } from "../../components/CollectionTree.tsx";
 import { ErrorText, hostname, Logo, timeAgo, useAction, useStored } from "../../components/ui.tsx";
 import type { Handlers } from "../../lib/engine.ts";
 import { call } from "../../lib/messages.ts";
-import { collectionsItem, configItem, statusItem } from "../../lib/storage.ts";
+import { collectionsItem, collectionStateItem, configItem, statusItem, type CollectionSummary } from "../../lib/storage.ts";
 
 const openSettings = () => {
   void browser.runtime.openOptionsPage();
@@ -142,6 +143,7 @@ function DevicesTabs() {
 
 function Collections() {
   const collections = useStored(collectionsItem);
+  const [query, setQuery] = useState("");
   if (!collections) return null;
   if (collections.length === 0) {
     return (
@@ -151,9 +153,52 @@ function Collections() {
     );
   }
   return (
+    <div className="stack" style={{ gap: 6 }}>
+      <input type="search" placeholder="Search bookmarks" aria-label="Search bookmarks" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+      {query.trim() ? (
+        <SearchResults collections={collections} query={query.trim().toLowerCase()} />
+      ) : (
+        <ul className="list">
+          {collections.map((c) => (
+            <CollectionTree key={c.id} collectionId={c.id} name={c.name} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+type Match = { id: string; title: string; url: string; collection: string };
+
+/** Bookmarks in any collection whose title or URL contains `query`. */
+function SearchResults({ collections, query }: { collections: CollectionSummary[]; query: string }) {
+  const [matches, setMatches] = useState<Match[]>();
+  useEffect(() => {
+    let current = true;
+    void Promise.all(
+      collections.map(async (c) => {
+        const tree = buildTree(new Map(Object.entries((await collectionStateItem(c.id).getValue()).nodes)));
+        return [...walk(tree)].flatMap(({ node }): Match[] =>
+          node.url !== null && `${node.title} ${node.url}`.toLowerCase().includes(query)
+            ? [{ id: node.id, title: node.title || node.url, url: node.url, collection: c.name }]
+            : [],
+        );
+      }),
+    ).then((results) => current && setMatches(results.flat().slice(0, 100)));
+    return () => void (current = false);
+  }, [collections, query]);
+
+  if (!matches) return null;
+  if (matches.length === 0) return <p className="muted">No bookmarks match.</p>;
+  return (
     <ul className="list">
-      {collections.map((c) => (
-        <CollectionTree key={c.id} collectionId={c.id} name={c.name} />
+      {matches.map((m) => (
+        <li key={`${m.collection}:${m.id}`}>
+          <button className="item" title={m.url} onClick={() => void browser.tabs.create({ url: m.url })}>
+            <span className="title">{m.title}</span>
+            <span className="host">{m.collection}</span>
+          </button>
+        </li>
       ))}
     </ul>
   );

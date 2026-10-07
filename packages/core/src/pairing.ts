@@ -31,6 +31,22 @@ export function normalizePairingCode(input: string): string | null {
   return code.length === CODE_LENGTH && [...code].every((c) => ALPHABET.includes(c)) ? code : null;
 }
 
+/**
+ * A pairing code with its server, as one string to paste or scan (QR) on the new device:
+ * `browserlace://pair?server=<url>&code=<code>`.
+ */
+export const pairingLink = (serverUrl: string, code: string) =>
+  `browserlace://pair?${new URLSearchParams({ server: serverUrl, code })}`;
+
+/** Reads what was typed into the join form: a bare code, or a pairing link. */
+export function parsePairingInput(input: string): { code: string; serverUrl?: string } {
+  const text = input.trim();
+  if (!text.startsWith("browserlace://")) return { code: text };
+  const params = new URL(text).searchParams;
+  const server = params.get("server");
+  return { code: params.get("code") ?? "", ...(server ? { serverUrl: server } : {}) };
+}
+
 async function derive(code: string) {
   const normalized = normalizePairingCode(code);
   if (!normalized) throw new Error("Invalid pairing code");

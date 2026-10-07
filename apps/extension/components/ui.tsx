@@ -1,4 +1,5 @@
 /** Hooks and small building blocks shared by the popup and options page. */
+import type { MountMode } from "@browserlace/core";
 import { useEffect, useState, type ReactNode } from "react";
 import type { WxtStorageItem } from "wxt/utils/storage";
 import { MARK, markWaves } from "../lib/mark.ts";
@@ -67,3 +68,5 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "warning" 
 }
 
 export const ErrorText = ({ error }: { error: string | undefined }) => (error ? <p className="error">{error}</p> : null);
+
+export const modeLabel: Record<MountMode, string> = { "two-way": "Two-way", receive: "Receive only", send: "Send only" };
