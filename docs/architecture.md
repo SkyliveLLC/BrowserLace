@@ -19,10 +19,14 @@ and stores ciphertext, and a pure TypeScript core that holds nearly all the logi
 - **Account**: a group of devices sharing one 256-bit encryption key. No email or
   password; devices join by pairing.
 - **Collection**: an independently synced bookmark tree with an encrypted name.
-- **Mount**: per browser, a collection mapped to one native folder, either `two-way` or
-  `receive`. BrowserLace only ever touches mounted folders, never the whole bookmark tree,
-  and two mounts can't overlap. Receive-only mounts need a new or empty folder, because
-  they replace its contents with bookmarks that were never in any history.
+- **Mount**: per browser, a collection mapped to one native folder: `two-way`, `receive`
+  (the folder mirrors the collection) or `send` (the collection mirrors the folder, and
+  edits made elsewhere are undone). BrowserLace only ever touches mounted folders, never
+  the whole bookmark tree, and two mounts can't overlap. Receive-only mounts need a new or
+  empty folder, because they replace its contents with bookmarks that were never in any
+  history.
+- **Profile**: an encrypted, named set of mount rules (collection, mode, folder name),
+  saved from one browser and applied on another to set it up in one step.
 - **Tab snapshot**: each device's open tabs, replaced wholesale on change. Never merged.
 
 ## Data model and convergence (`packages/core/src/model.ts`)
@@ -75,6 +79,11 @@ Sync compares state, not events. Bookmark events only trigger a debounced sync. 
    with normalized URLs) rather than read back, so edits the user makes during step 4 still
    count as local edits next time.
 
+**Send-only** mounts diff the folder against the model itself instead of the baseline,
+with links to nodes the model no longer shows dropped. The result is exactly the ops that
+make the collection match the folder, including undoing other devices' edits; the folder
+is never written.
+
 This handles missed events, edits made while the browser was closed, and crashes the same
 way: a pass that dies before step 5 leaves the old baseline, and the next pass converges.
 Nodes a browser refuses (e.g. Firefox and `javascript:` URLs) are skipped and retried
@@ -94,7 +103,9 @@ and the model recreates the missing bookmarks).
 - **Pairing:** an existing device shows a one-time 16-character code (80 bits). Both
   devices derive two values from it with HKDF: a lookup id, which the server uses to find
   the pairing, and a wrapping key, which encrypts the keyring. The server never sees the
-  code or the keys. Pairings expire after 10 minutes and work once.
+  code or the keys. Pairings expire after 10 minutes and work once. The code is also
+  offered as a link (`browserlace://pair?server=…&code=…`) and a QR code of it, so the new
+  device gets the server URL in the same step.
 - **Device keys.** Each device has an X25519 key pair and registers the public key with
   an **attestation**: an HMAC under an epoch key, which only account devices can make.
 - **Removing a device starts a new epoch.** The removing device rotates right away (and
@@ -158,8 +169,6 @@ The extension imports the server's route types (`AppType`) for a fully typed cli
 - Log compaction: new devices replay the full log, which is fine at bookmark scale.
 - Live push (WebSocket). MV3 service workers make long-lived connections fiddly, and a
   1-minute alarm plus event triggers is enough for bookmarks.
-- Named profiles that apply a set of mounts to a new device in one step. Today each browser
-  picks its collections and folders individually.
 - Rate limiting and billing on the server. `SIGNUP_TOKEN` gates signups for now.
 - Smarter folder matching on mount: a folder renamed in one browser before mounting comes
   through as a second folder (its bookmarks are still matched by URL, not duplicated).
