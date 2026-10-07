@@ -13,6 +13,7 @@ import {
   generatePairingCode,
   generateRecoveryKey,
   importKeyring,
+  MissingKeyError,
   importPrivateKey,
   normalizePairingCode,
   open,
@@ -26,6 +27,7 @@ import {
   restoreCollection,
   rotateKeys,
   seal,
+  sendPayload,
   syncCollection,
   tabsSnapshot,
   unwrapKeyring,
@@ -38,16 +40,19 @@ import { browser } from "wxt/browser";
 import { ApiError, createApi, transport, unwrap, type Api } from "./api.ts";
 import { createMountFolder, hasBookmarksApi, nativeBookmarks } from "./bookmarks.ts";
 import { browserName } from "./platform.ts";
+import type { ServerEvent } from "@browserlace/server";
 import {
   collectionsItem,
   collectionStateItem,
   configItem,
+  devicesItem,
   forgetCollection,
   lastTabsItem,
   mountsItem,
   mountStateItem,
   shareTabsItem,
   statusItem,
+  tabsChangedItem,
   type CollectionSummary,
   type Config,
 } from "./storage.ts";
@@ -144,6 +149,30 @@ async function refreshKeys(api: Api, config: Config, { rotate = false } = {}): P
   }
 }
 
+/** Opens tabs other devices sent here, then removes them from the server. */
+async function receiveSends(api: Api, keyring: Keyring, config: Config) {
+  const { sends } = await unwrap(api.v1.sends.$get());
+  const names = new Map((await devicesItem.getValue()).map((d) => [d.id, d.name]));
+  for (const send of sends) {
+    const tab = await open(keyring, send.blob, contexts.send(config.deviceId, send.id), sendPayload).catch((error: unknown) =>
+      error instanceof MissingKeyError ? undefined : null,
+    );
+    if (tab === undefined) continue; // Sealed under a key we don't have yet; try again next sync.
+    if (tab && /^https?:\/\//.test(tab.url)) {
+      const opened = await browser.tabs.create({ url: tab.url, active: false });
+      await browser.notifications
+        ?.create(`send:${opened.id}`, {
+          type: "basic",
+          iconUrl: browser.runtime.getURL("/icon/128.png"),
+          title: `Tab from ${names.get(send.fromDeviceId) ?? "another device"}`,
+          message: tab.title || tab.url,
+        })
+        .catch(() => {});
+    }
+    await unwrap(api.v1.sends[":id"].$delete({ param: { id: send.id } }));
+  }
+}
+
 async function publishTabs(api: Api, keyring: Keyring, config: Config, force = false) {
   const snapshot = (await shareTabsItem.getValue()) ? await captureTabs() : { v: 1 as const, capturedAt: Date.now(), windows: [] };
   // Includes the epoch so a new key republishes the snapshot under it.
@@ -206,6 +235,9 @@ async function syncAll(resolution?: Resolution) {
       }
     }
     await mountsItem.setValue(mounts);
+    const me = await unwrap(api.v1.me.$get());
+    await devicesItem.setValue(me.devices.filter((d) => d.id !== config.deviceId).map(({ id, name }) => ({ id, name })));
+    await receiveSends(api, keyring, config);
     await publishTabs(api, keyring, config);
     await statusItem.setValue({ syncing: false, lastSyncAt: Date.now(), collectionErrors });
   } catch (error) {
@@ -253,6 +285,12 @@ async function mountCollection(collectionId: string, name: string, folder: strin
   }
   await mountStateItem(collectionId).removeValue();
   await mountsItem.setValue({ ...(await mountsItem.getValue()), [collectionId]: { folderId, mode } });
+}
+
+/** Reacts to a live event from another device: refresh tabs, or sync soon. */
+export function onLiveEvent(event: ServerEvent) {
+  if (event.type === "tabs") void tabsChangedItem.setValue(Date.now());
+  else scheduleSync(event.type === "sends" ? 0 : 300);
 }
 
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -506,6 +544,15 @@ export const handlers = {
       }),
     );
   },
+
+  /** Sends a tab to another device, which opens it on its next sync (immediately if online). */
+  sendTab: (input: { toDeviceId: string; url: string; title: string }) =>
+    exclusive(async () => {
+      const { api, keyring } = await session({ refresh: true });
+      const id = crypto.randomUUID();
+      const blob = await seal(keyring, { v: 1, url: input.url, title: input.title }, contexts.send(input.toDeviceId, id));
+      await unwrap(api.v1.sends.$post({ json: { id, toDeviceId: input.toDeviceId, blob } }));
+    }),
 
   setShareTabs: (input: { enabled: boolean }) =>
     exclusive(async () => {

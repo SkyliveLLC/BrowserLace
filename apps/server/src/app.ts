@@ -4,6 +4,7 @@
  *
  * The extension imports `AppType` for a typed client (`hc<AppType>`).
  */
+import { upgradeWebSocket } from "@hono/node-server";
 import { zValidator } from "@hono/zod-validator";
 import { Hono, type ValidationTargets } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -13,6 +14,7 @@ import { HTTPException } from "hono/http-exception";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { transaction, type Database } from "./db.ts";
+import { Events } from "./events.ts";
 
 /** Validates a request part, answering 400 itself so error shapes stay out of the client types. */
 const valid = <Target extends keyof ValidationTargets, Schema extends z.ZodType>(target: Target, schema: Schema) =>
@@ -33,6 +35,7 @@ const grantBlob = z.string().max(65_536).regex(/^[\w-]{43}\.[\w-]+$/);
 const RECOVERY = "recovery";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
+const SEND_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PULL_PAGE = 500;
 
 type Device = { id: string; account_id: string };
@@ -40,14 +43,24 @@ type Env = { Variables: { device: Device } };
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
+/** The token in a WebSocket's first message, `{ "token": "…" }`. */
+function authMessage(text: string): string | undefined {
+  try {
+    return z.object({ token: z.string() }).parse(JSON.parse(text)).token;
+  } catch {
+    return undefined;
+  }
+}
+
 export type AppOptions = {
   db: Database;
   /** When set, creating an account requires this token. Leave unset for open signup. */
   signupToken?: string | undefined;
   now?: () => number;
+  events?: Events;
 };
 
-export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
+export function createApp({ db, signupToken, now = Date.now, events = new Events() }: AppOptions) {
   const issueDevice = (accountId: string, info: z.output<typeof deviceInfo>) => {
     const id = randomUUID();
     const token = randomBytes(32).toString("base64url");
@@ -57,11 +70,11 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
     return { accountId, deviceId: id, token };
   };
 
+  const deviceForToken = (token: string | undefined) =>
+    token ? (db.prepare("select id, account_id from devices where token_hash = ?").get(hashToken(token)) as Device | undefined) : undefined;
+
   const auth = createMiddleware<Env>(async (c, next) => {
-    const token = c.req.header("authorization")?.match(/^Bearer (.+)$/)?.[1];
-    const device = token
-      ? (db.prepare("select id, account_id from devices where token_hash = ?").get(hashToken(token)) as Device | undefined)
-      : undefined;
+    const device = deviceForToken(c.req.header("authorization")?.match(/^Bearer (.+)$/)?.[1]);
     if (!device) throw new HTTPException(401, { message: "Unknown or revoked device" });
     db.prepare("update devices set last_seen_at = ? where id = ?").run(now(), device.id);
     c.set("device", device);
@@ -126,6 +139,33 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       return c.json({ ...issueDevice(recovery.account_id, info), grants }, 201);
     })
 
+    /**
+     * Live events. Browsers can't set headers on a WebSocket, so the first message
+     * authenticates: `{ "token": "…" }`. Later messages are keepalives and are ignored.
+     */
+    .get(
+      "/v1/events",
+      upgradeWebSocket(() => {
+        let unsubscribe: (() => void) | undefined;
+        return {
+          onMessage(event, ws) {
+            if (unsubscribe) return;
+            const device = deviceForToken(typeof event.data === "string" ? authMessage(event.data) : undefined);
+            if (!device) return ws.close(4001, "Unknown or revoked device");
+            unsubscribe = events.subscribe(device.account_id, {
+              deviceId: device.id,
+              send: (e) => ws.send(JSON.stringify(e)),
+              close: () => ws.close(4001, "Device removed"),
+            });
+            ws.send(JSON.stringify({ type: "ready" }));
+          },
+          onClose() {
+            unsubscribe?.();
+          },
+        };
+      }),
+    )
+
     .use("/v1/*", auth)
 
     .post("/v1/pairings", valid("json", z.object({ lookupId, wrappedKey: blob(65_536), epoch })), (c) => {
@@ -169,6 +209,8 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
         // The removed device knows the current key, so the next device to sync starts a new epoch.
         db.prepare("update accounts set rotation_needed = 1 where id = ?").run(accountId);
       });
+      events.disconnect(accountId, id);
+      events.publish(accountId, { type: "keys", from: c.var.device.id });
       return c.json({ ok: true });
     })
 
@@ -277,6 +319,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
             );
           }
         });
+        events.publish(accountId, { type: "keys", from: c.var.device.id });
         return c.json({ ok: true });
       },
     )
@@ -340,6 +383,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       } catch {
         throw new HTTPException(409, { message: "Collection already exists" });
       }
+      events.publish(c.var.device.account_id, { type: "collections", from: c.var.device.id });
       return c.json({ id }, 201);
     })
 
@@ -347,6 +391,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       const { id } = c.req.valid("param");
       ownCollection(c.var.device, id);
       db.prepare("update collections set meta = ? where id = ?").run(c.req.valid("json").meta, id);
+      events.publish(c.var.device.account_id, { type: "collections", from: c.var.device.id });
       return c.json({ ok: true });
     })
 
@@ -354,6 +399,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       const { id } = c.req.valid("param");
       ownCollection(c.var.device, id);
       db.prepare("delete from collections where id = ?").run(id);
+      events.publish(c.var.device.account_id, { type: "collections", from: c.var.device.id });
       return c.json({ ok: true });
     })
 
@@ -398,6 +444,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
           )
           .get(id, c.var.device.id, blob, now(), id, head) as { seq: number } | undefined;
         if (!row) throw new HTTPException(409, { message: "The collection changed; pull and retry" });
+        events.publish(c.var.device.account_id, { type: "changes", from: c.var.device.id, collectionId: id });
         return c.json({ seq: row.seq }, 201);
       },
     )
@@ -442,6 +489,36 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
         `insert into tabs (device_id, blob, updated_at) values (?, ?, ?)
          on conflict (device_id) do update set blob = excluded.blob, updated_at = excluded.updated_at`,
       ).run(c.var.device.id, c.req.valid("json").blob, now());
+      events.publish(c.var.device.account_id, { type: "tabs", from: c.var.device.id });
+      return c.json({ ok: true });
+    })
+
+    /** A tab sent to another device, kept until that device opens it (or 30 days). */
+    .post("/v1/sends", valid("json", z.object({ id: z.uuid(), toDeviceId: z.uuid(), blob: blob(16_384) })), (c) => {
+      const { id, toDeviceId, blob } = c.req.valid("json");
+      const accountId = c.var.device.account_id;
+      const target = db.prepare("select 1 from devices where id = ? and account_id = ?").get(toDeviceId, accountId);
+      if (!target) throw new HTTPException(404, { message: "Device not found" });
+      db.prepare("delete from sends where created_at <= ?").run(now() - SEND_TTL_MS);
+      db.prepare(
+        "insert into sends (id, account_id, to_device_id, from_device_id, blob, created_at) values (?, ?, ?, ?, ?, ?)",
+      ).run(id, accountId, toDeviceId, c.var.device.id, blob, now());
+      events.publish(accountId, { type: "sends", from: c.var.device.id });
+      return c.json({ ok: true }, 201);
+    })
+
+    .get("/v1/sends", (c) => {
+      const sends = db
+        .prepare(
+          `select id, from_device_id as fromDeviceId, blob, created_at as createdAt from sends
+           where to_device_id = ? and created_at > ? order by created_at`,
+        )
+        .all(c.var.device.id, now() - SEND_TTL_MS) as { id: string; fromDeviceId: string; blob: string; createdAt: number }[];
+      return c.json({ sends });
+    })
+
+    .delete("/v1/sends/:id", idParam, (c) => {
+      db.prepare("delete from sends where id = ? and to_device_id = ?").run(c.req.valid("param").id, c.var.device.id);
       return c.json({ ok: true });
     });
 
@@ -449,3 +526,4 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
 }
 
 export type AppType = ReturnType<typeof createApp>;
+export type { ServerEvent } from "./events.ts";

@@ -1,6 +1,9 @@
+import { serve } from "@hono/node-server";
 import { testClient } from "hono/testing";
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import type { AddressInfo } from "node:net";
+import { describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 import { createApp } from "./app.ts";
 import { openDatabase } from "./db.ts";
 
@@ -234,5 +237,71 @@ describe("profiles", () => {
     const list = async (token: string) => (await (await client.v1.profiles.$get({}, as(token))).json()).profiles;
     expect(await list(owner.token)).toEqual([expect.objectContaining({ id, blob: "v2" })]);
     expect(await list(stranger.token)).toEqual([]);
+  });
+});
+
+describe("sends", () => {
+  it("delivers a tab to one device of the same account until it's acknowledged", async () => {
+    const { client, as, signup } = setup();
+    const from = await signup();
+    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped", epoch: 1 } }, as(from.token));
+    const to = await (await client.v1.pairings.claim.$post({ json: { lookupId: LOOKUP, name: "B", browser: "firefox" } })).json();
+    const stranger = await signup();
+    const id = randomUUID();
+
+    const send = (token: string, toDeviceId: string) => client.v1.sends.$post({ json: { id: randomUUID(), toDeviceId, blob: "tab" } }, as(token));
+    expect((await send(stranger.token, to.deviceId)).status).toBe(404);
+    await client.v1.sends.$post({ json: { id, toDeviceId: to.deviceId, blob: "tab" } }, as(from.token));
+
+    const inbox = async (token: string) => (await (await client.v1.sends.$get({}, as(token))).json()).sends;
+    expect(await inbox(to.token)).toEqual([expect.objectContaining({ id, fromDeviceId: from.deviceId, blob: "tab" })]);
+    expect(await inbox(from.token)).toEqual([]);
+    await client.v1.sends[":id"].$delete({ param: { id } }, as(to.token));
+    expect(await inbox(to.token)).toEqual([]);
+  });
+});
+
+describe("live events", () => {
+  it("tells an account's other connections what changed, and nobody else", async () => {
+    const db = openDatabase(":memory:");
+    const app = createApp({ db });
+    const server = serve({ fetch: app.fetch, port: 0, websocket: { server: new WebSocketServer({ noServer: true }) } });
+    await new Promise((resolve) => server.once("listening", resolve));
+    const base = `http://localhost:${(server.address() as AddressInfo).port}`;
+    const signup = () =>
+      fetch(`${base}/v1/accounts`, { method: "POST", body: JSON.stringify({ name: "A", browser: "chrome" }), headers: { "content-type": "application/json" } })
+        .then((r) => r.json() as Promise<{ token: string; deviceId: string }>);
+    const listen = async (token: string) => {
+      const socket = new WebSocket(`${base.replace("http", "ws")}/v1/events`);
+      const received: unknown[] = [];
+      socket.addEventListener("message", (e) => received.push(JSON.parse(String(e.data))));
+      await new Promise((resolve) => socket.addEventListener("open", resolve));
+      socket.send(JSON.stringify({ token }));
+      await vi.waitFor(() => expect(received).toEqual([{ type: "ready" }]));
+      return { socket, received };
+    };
+
+    const owner = await signup();
+    const stranger = await signup();
+    const mine = await listen(owner.token);
+    const theirs = await listen(stranger.token);
+    await fetch(`${base}/v1/tabs`, {
+      method: "PUT",
+      body: JSON.stringify({ blob: "tabs" }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${owner.token}` },
+    });
+
+    await vi.waitFor(() => expect(mine.received).toContainEqual({ type: "tabs", from: owner.deviceId }));
+    expect(theirs.received).toEqual([{ type: "ready" }]);
+
+    const rejected = new WebSocket(`${base.replace("http", "ws")}/v1/events`);
+    await new Promise((resolve) => rejected.addEventListener("open", resolve));
+    rejected.send(JSON.stringify({ token: "nope" }));
+    const code = await new Promise((resolve) => rejected.addEventListener("close", (e) => resolve(e.code)));
+    expect(code).toBe(4001);
+
+    mine.socket.close();
+    theirs.socket.close();
+    server.close();
   });
 });

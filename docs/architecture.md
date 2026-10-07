@@ -28,6 +28,8 @@ and stores ciphertext, and a pure TypeScript core that holds nearly all the logi
 - **Profile**: an encrypted, named set of mount rules (collection, mode, folder name),
   saved from one browser and applied on another to set it up in one step.
 - **Tab snapshot**: each device's open tabs, replaced wholesale on change. Never merged.
+- **Send**: a tab sent to one device, encrypted for the account and addressed by device
+  id. The target opens it and deletes it; unopened sends expire after 30 days.
 
 ## Data model and convergence (`packages/core/src/model.ts`)
 
@@ -155,8 +157,13 @@ The extension imports the server's route types (`AppType`) for a fully typed cli
   (`exclusive`), so syncs and edits never interleave. UI pages read `storage.local`
   directly and send writes to the background through a typed message channel
   (`lib/messages.ts`).
-- Triggers: bookmark events (2 s debounce), tab events (3 s, tabs only), a 1-minute
-  alarm, browser startup and the popup's sync button.
+- Triggers: bookmark events (2 s debounce), tab events (3 s, tabs only), live events, a
+  1-minute alarm, browser startup and the popup's sync button.
+- **Live events** (`lib/live.ts`): one WebSocket to `/v1/events`, authenticated by its
+  first message. After any write the server tells the account's other sockets what kind
+  of thing changed (never the content), and they sync within a second. The socket sends
+  a keepalive every 20 s, which also keeps Chrome's service worker alive; it reconnects
+  with backoff, and the alarm reopens it if Firefox or Safari unloaded the background.
 - Persisted per collection: the replayed model and cursor. Per mount: links (sync id ↔
   native id) and the baseline.
 - Safari has no `bookmarks` API. The build omits the permission and the UI hides mounting,
@@ -167,8 +174,6 @@ The extension imports the server's route types (`AppType`) for a fully typed cli
 - History, passwords, cookies, extensions and settings sync.
 - Native Safari bookmarks (would need a macOS helper app using private APIs).
 - Log compaction: new devices replay the full log, which is fine at bookmark scale.
-- Live push (WebSocket). MV3 service workers make long-lived connections fiddly, and a
-  1-minute alarm plus event triggers is enough for bookmarks.
 - Rate limiting and billing on the server. `SIGNUP_TOKEN` gates signups for now.
 - Smarter folder matching on mount: a folder renamed in one browser before mounting comes
   through as a second folder (its bookmarks are still matched by URL, not duplicated).

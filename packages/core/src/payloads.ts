@@ -54,10 +54,14 @@ export const profilePayload = z.object({
 });
 export type Profile = z.output<typeof profilePayload>;
 
+/** A tab sent to another device. */
+export const sendPayload = z.object({ v: z.literal(1), url: z.string(), title: z.string() });
+
 /** Additional-data contexts that bind each blob to where it's stored. */
 export const contexts = {
   change: (collectionId: string) => `change:${collectionId}`,
   meta: (collectionId: string) => `meta:${collectionId}`,
   tabs: (deviceId: string) => `tabs:${deviceId}`,
   profile: (profileId: string) => `profile:${profileId}`,
+  send: (toDeviceId: string, sendId: string) => `send:${toDeviceId}:${sendId}`,
 };

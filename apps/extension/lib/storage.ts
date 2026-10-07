@@ -38,6 +38,11 @@ export const shareTabsItem = storage.defineItem<boolean>("local:shareTabs", { fa
 /** Fingerprint of the last published tab snapshot, to skip redundant uploads. */
 export const lastTabsItem = storage.defineItem<string>("local:lastTabs", { fallback: "" });
 
+/** The account's other devices, refreshed on sync, for "send tab" menus. */
+export const devicesItem = storage.defineItem<{ id: string; name: string }[]>("local:devices", { fallback: [] });
+/** Bumped when another device's tabs change, so an open popup can refresh. */
+export const tabsChangedItem = storage.defineItem<number>("local:tabsChanged", { fallback: 0 });
+
 export const collectionStateItem = (id: string) =>
   storage.defineItem<CollectionState>(`local:collection:${id}`, { fallback: { cursor: 0, lastHash: "", nodes: {} } });
 export const mountStateItem = (id: string) =>

@@ -6,7 +6,14 @@ import { CollectionTree } from "../../components/CollectionTree.tsx";
 import { ErrorText, hostname, Logo, timeAgo, useAction, useStored } from "../../components/ui.tsx";
 import type { Handlers } from "../../lib/engine.ts";
 import { call } from "../../lib/messages.ts";
-import { collectionsItem, collectionStateItem, configItem, statusItem, type CollectionSummary } from "../../lib/storage.ts";
+import {
+  collectionsItem,
+  collectionStateItem,
+  configItem,
+  statusItem,
+  tabsChangedItem,
+  type CollectionSummary,
+} from "../../lib/storage.ts";
 
 const openSettings = () => {
   void browser.runtime.openOptionsPage();
@@ -84,9 +91,11 @@ type DeviceTabs = Awaited<ReturnType<Handlers["devicesWithTabs"]>>[number];
 function DevicesTabs() {
   const [devices, setDevices] = useState<DeviceTabs[]>();
   const [error, setError] = useState<string>();
+  // Reloads when another device's tabs change while the popup is open.
+  const tabsChanged = useStored(tabsChangedItem);
   useEffect(() => {
     call("devicesWithTabs").then(setDevices, (e: Error) => setError(e.message));
-  }, []);
+  }, [tabsChanged]);
 
   if (error) return <ErrorText error={error} />;
   if (!devices) return <p className="muted">Loading…</p>;
@@ -107,6 +116,8 @@ function DevicesTabs() {
             <span className="muted" style={{ fontSize: 11 }}>
               seen {timeAgo(device.lastSeenAt)}
             </span>
+            <span className="spacer" />
+            <SendTab deviceId={device.id} />
           </div>
           {!device.snapshot || device.snapshot.windows.length === 0 ? (
             <p className="muted">No shared tabs.</p>
@@ -138,6 +149,22 @@ function DevicesTabs() {
         </section>
       ))}
     </div>
+  );
+}
+
+/** Sends the active tab of this window to a device. */
+function SendTab({ deviceId }: { deviceId: string }) {
+  const [sent, setSent] = useState(false);
+  const send = useAction(async () => {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.url) throw new Error("This tab can't be sent");
+    await call("sendTab", { toDeviceId: deviceId, url: tab.url, title: tab.title ?? tab.url });
+    setSent(true);
+  });
+  return (
+    <button className="ghost" style={{ fontSize: 11 }} disabled={send.pending || sent} title={send.error} onClick={() => send.run()}>
+      {sent ? "Sent ✓" : send.error ? "Couldn't send" : "Send this tab"}
+    </button>
   );
 }
 

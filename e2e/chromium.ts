@@ -142,6 +142,25 @@ try {
   check("popup search finds a nested bookmark", await popup.locator(".item .title").allTextContents(), ["MDN"]);
   await popup.close();
 
+  // Live push: B sees A's new bookmark without syncing by hand.
+  const pushedAt = Date.now();
+  await bookmark(a, "Work", "Live", "https://live.example/");
+  while (!(await b.bookmarks("Work")).includes("Live https://live.example/") && Date.now() - pushedAt < 15_000) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const liveSeconds = (Date.now() - pushedAt) / 1000;
+  console.log(`  live bookmark arrived in ${liveSeconds.toFixed(1)}s (2s of that is the local edit debounce)`);
+  check("live push delivers a bookmark well before the 1-minute alarm", liveSeconds < 10, true);
+
+  // Send tab: A sends a page to B, which opens it right away.
+  const bId = ((await b.storage("config")) as { deviceId: string }).deviceId;
+  const sentUrl = `${server.url}/healthz?sent=1`;
+  const sentAt = Date.now();
+  await a.call("sendTab", { toDeviceId: bId, url: sentUrl, title: "Sent from A" });
+  await b.context.waitForEvent("page", { predicate: (p) => p.url() === sentUrl, timeout: 15_000 });
+  console.log(`  sent tab opened on B in ${((Date.now() - sentAt) / 1000).toFixed(1)}s`);
+  check("B opens the sent tab", b.context.pages().some((p) => p.url() === sentUrl), true);
+
   // Send-only: A's folder is the source of truth for "Reading".
   await a.page.getByPlaceholder("Work, Research, Recipes…").fill("Reading");
   await a.page.locator("form", { hasText: "New collection" }).getByLabel("Direction").selectOption("send");

@@ -10,8 +10,15 @@ export default defineConfig({
   manifest: ({ browser }) => ({
     name: "BrowserLace",
     description: "End-to-end encrypted bookmark and tab sync across Chrome, Firefox and Safari.",
-    // Safari has no WebExtension bookmarks API; it browses collections inside the extension instead.
-    permissions: ["storage", "unlimitedStorage", "alarms", "tabs", ...(browser === "safari" ? [] : ["bookmarks"])],
+    // Safari has no WebExtension bookmarks or notifications API; it browses collections inside the extension.
+    permissions: [
+      "storage",
+      "unlimitedStorage",
+      "alarms",
+      "tabs",
+      "contextMenus",
+      ...(browser === "safari" ? [] : ["bookmarks", "notifications"]),
+    ],
     ...(browser === "firefox" && {
       browser_specific_settings: {
         gecko: {
