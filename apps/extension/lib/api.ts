@@ -1,5 +1,5 @@
 /** Typed client for the sync server, built from the server's own route types. */
-import type { Transport } from "@browserlace/core";
+import { PrunedError, type Transport } from "@browserlace/core";
 import type { AppType } from "@browserlace/server";
 import { hc } from "hono/client";
 
@@ -48,11 +48,16 @@ export const transport = (api: Api): Transport => ({
     for (let more = true; more; ) {
       const page = await unwrap(
         api.v1.collections[":id"].changes.$get({ param: { id: collectionId }, query: { after: String(after) } }),
-      );
+      ).catch((error: unknown) => {
+        throw error instanceof ApiError && error.status === 410 ? new PrunedError() : error;
+      });
       changes.push(...page.changes);
       after = page.changes.at(-1)?.seq ?? after;
       more = page.more;
     }
     return changes;
+  },
+  async snapshot(collectionId) {
+    return (await unwrap(api.v1.collections[":id"].snapshot.$get({ param: { id: collectionId } }))).snapshot;
   },
 });

@@ -209,8 +209,26 @@ try {
   // D sets itself up from B's profile instead of picking folders.
   await d.page.locator(".card", { hasText: "Laptop" }).getByRole("button", { name: "Apply here" }).click();
   await d.page.getByRole("button", { name: "Applied" }).waitFor();
+  await d.call("syncNow");
   check("D recovers every bookmark, including post-rotation ones", await d.bookmarks("Work"), await a.bookmarks("Work"));
   await d.page.screenshot({ path: `${shots}/options-recovered.png`, fullPage: true });
+
+  // Snapshots: after 500 changes a device uploads one, and a new browser starts from it.
+  for (let i = 0; i < 500; i++) {
+    await bookmark(a, "Work", `bulk ${i}`, `https://bulk${i}.example/`);
+    await a.call("syncNow");
+  }
+  const { token } = (await a.storage("config")) as { token: string };
+  const collections = (await (await fetch(`${server.url}/v1/collections`, { headers: { authorization: `Bearer ${token}` } })).json()) as {
+    collections: { snapshotSeq: number }[];
+  };
+  check("a snapshot is uploaded after 500 changes", collections.collections.some((c) => c.snapshotSeq >= 500), true);
+  const e = await launch("Chromium E");
+  await pairWith(a, e);
+  await e.page.locator(".card", { hasText: "Laptop" }).getByRole("button", { name: "Apply here" }).click();
+  await e.page.getByRole("button", { name: "Applied" }).waitFor();
+  await e.call("syncNow"); // Queued behind the apply's own sync.
+  check("a new browser bootstraps from the snapshot", await e.bookmarks("Work"), await a.bookmarks("Work"));
 
   console.log(`screenshots in ${shots}`);
 } finally {

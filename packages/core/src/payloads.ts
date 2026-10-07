@@ -54,6 +54,17 @@ export const profilePayload = z.object({
 });
 export type Profile = z.output<typeof profilePayload>;
 
+/**
+ * A collection's replayed state at `cursor`, so a new device doesn't have to replay the
+ * whole log, and the server can drop old changes. `lastHash` continues the hash chain.
+ */
+export const snapshotPayload = z.object({
+  v: z.literal(1),
+  cursor: z.number().int().positive(),
+  lastHash: z.string(),
+  nodes: z.record(z.string(), nodeFields),
+});
+
 /** A tab sent to another device. */
 export const sendPayload = z.object({ v: z.literal(1), url: z.string(), title: z.string() });
 
@@ -64,4 +75,5 @@ export const contexts = {
   tabs: (deviceId: string) => `tabs:${deviceId}`,
   profile: (profileId: string) => `profile:${profileId}`,
   send: (toDeviceId: string, sendId: string) => `send:${toDeviceId}:${sendId}`,
+  snapshot: (collectionId: string) => `snapshot:${collectionId}`,
 };

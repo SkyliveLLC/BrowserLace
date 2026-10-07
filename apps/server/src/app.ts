@@ -93,7 +93,8 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
   const app = new Hono<Env>()
     // Clients authenticate with bearer tokens, never cookies, so any origin may call us.
     .use(cors())
-    .use(bodyLimit({ maxSize: 8 * 1024 * 1024 }))
+    // Room for a snapshot of a very large collection; everything else is far smaller.
+    .use(bodyLimit({ maxSize: 16 * 1024 * 1024 }))
     .onError((err, c) => {
       if (err instanceof HTTPException) return c.json({ error: err.message }, err.status);
       console.error(err);
@@ -363,11 +364,12 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
     .get("/v1/collections", (c) => {
       const collections = db
         .prepare(
-          `select c.id, c.meta, c.created_at as createdAt, coalesce(max(ch.seq), 0) as headSeq
+          `select c.id, c.meta, c.created_at as createdAt, max(coalesce(max(ch.seq), 0), c.pruned_seq) as headSeq,
+             coalesce((select seq from snapshots s where s.collection_id = c.id), 0) as snapshotSeq
            from collections c left join changes ch on ch.collection_id = c.id
            where c.account_id = ? group by c.id order by c.created_at`,
         )
-        .all(c.var.device.account_id) as { id: string; meta: string; createdAt: number; headSeq: number }[];
+        .all(c.var.device.account_id) as { id: string; meta: string; createdAt: number; headSeq: number; snapshotSeq: number }[];
       return c.json({ collections });
     })
 
@@ -410,6 +412,10 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       (c) => {
         const { id } = c.req.valid("param");
         ownCollection(c.var.device, id);
+        const { pruned_seq: pruned } = db.prepare("select pruned_seq from collections where id = ?").get(id) as { pruned_seq: number };
+        if (c.req.valid("query").after < pruned) {
+          throw new HTTPException(410, { message: "Those changes were pruned; start from the snapshot" });
+        }
         const changes = db
           .prepare(
             `select seq, device_id as deviceId, created_at as createdAt, blob from changes
@@ -435,11 +441,13 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
         ownCollection(c.var.device, id);
         // One statement, so concurrent pushes can't claim the same seq. It only inserts when the
         // log still ends at `head`, so a client never appends on top of changes it hasn't seen.
+        // A pruned log may be empty, so its end is at least the pruned watermark.
         const row = db
           .prepare(
             `insert into changes (collection_id, seq, device_id, blob, created_at)
-             select ?, coalesce(max(seq), 0) + 1, ?, ?, ? from changes where collection_id = ?
-             having coalesce(max(seq), 0) = ?
+             select ?, max(coalesce(max(ch.seq), 0), c.pruned_seq) + 1, ?, ?, ?
+             from collections c left join changes ch on ch.collection_id = c.id where c.id = ?
+             having max(coalesce(max(ch.seq), 0), c.pruned_seq) = ?
              returning seq`,
           )
           .get(id, c.var.device.id, blob, now(), id, head) as { seq: number } | undefined;
@@ -473,6 +481,40 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
       db.prepare("delete from profiles where id = ? and account_id = ?").run(c.req.valid("param").id, c.var.device.account_id);
       return c.json({ ok: true });
     })
+
+    .get("/v1/collections/:id/snapshot", idParam, (c) => {
+      const { id } = c.req.valid("param");
+      ownCollection(c.var.device, id);
+      const snapshot = db.prepare("select seq, blob from snapshots where collection_id = ?").get(id) as
+        | { seq: number; blob: string }
+        | undefined;
+      return c.json({ snapshot: snapshot ?? null });
+    })
+
+    /** Stores a newer snapshot. `seq` must be a change the log has reached. */
+    .put(
+      "/v1/collections/:id/snapshot",
+      idParam,
+      valid("json", z.object({ seq: z.number().int().positive(), blob: blob(16_000_000) })),
+      (c) => {
+        const { id } = c.req.valid("param");
+        const { seq, blob } = c.req.valid("json");
+        ownCollection(c.var.device, id);
+        const { head } = db
+          .prepare(
+            `select max(coalesce(max(ch.seq), 0), c.pruned_seq) as head
+             from collections c left join changes ch on ch.collection_id = c.id where c.id = ?`,
+          )
+          .get(id) as { head: number };
+        if (seq > head) throw new HTTPException(400, { message: "Snapshot is ahead of the log" });
+        db.prepare(
+          `insert into snapshots (collection_id, seq, blob, created_at) values (?, ?, ?, ?)
+           on conflict (collection_id) do update set seq = excluded.seq, blob = excluded.blob, created_at = excluded.created_at
+           where excluded.seq > snapshots.seq`,
+        ).run(id, seq, blob, now());
+        return c.json({ ok: true });
+      },
+    )
 
     .get("/v1/tabs", (c) => {
       const tabs = db

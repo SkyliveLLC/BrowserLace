@@ -4,7 +4,7 @@
  */
 import { hashBlob, MissingKeyError, open, seal, type Keyring } from "./crypto.ts";
 import { applyOps, buildTree, diffModels, type Model, type NodeFields, type Op } from "./model.ts";
-import { changePayload, contexts } from "./payloads.ts";
+import { changePayload, contexts, snapshotPayload } from "./payloads.ts";
 import {
   applyTree,
   countRemovals,
@@ -25,8 +25,21 @@ export interface Transport {
    * device pushed first, so the caller can pull, re-diff and retry.
    */
   push(collectionId: string, blob: string, head: number): Promise<boolean>;
-  /** All changes with `seq > after`, oldest first. */
+  /**
+   * All changes with `seq > after`, oldest first. Throws `PrunedError` if the server has
+   * dropped some of them (they're older than its history and covered by a snapshot).
+   */
   pull(collectionId: string, after: number): Promise<Change[]>;
+  /** The collection's latest snapshot, if any device has uploaded one. */
+  snapshot(collectionId: string): Promise<{ blob: string } | null>;
+}
+
+/** The server no longer has every change after the requested point; start from its snapshot. */
+export class PrunedError extends Error {
+  constructor() {
+    super("The server no longer keeps that much history");
+    this.name = "PrunedError";
+  }
 }
 
 /** The replayed model plus the last applied seq and its hash, persisted per collection. */
@@ -102,6 +115,31 @@ async function replay(model: Model, keyring: Keyring, collectionId: string, chan
   return { unreadable, lastHash };
 }
 
+export const sealSnapshot = (keyring: Keyring, collectionId: string, state: CollectionState) =>
+  seal(keyring, { v: 1, ...state }, contexts.snapshot(collectionId));
+
+/** The collection as of its latest snapshot, or empty when there's none. */
+async function snapshotState(keyring: Keyring, transport: Transport, collectionId: string): Promise<CollectionState> {
+  const snapshot = await transport.snapshot(collectionId);
+  if (!snapshot) return emptyCollectionState();
+  const { cursor, lastHash, nodes } = await open(keyring, snapshot.blob, contexts.snapshot(collectionId), snapshotPayload);
+  return { cursor, lastHash, nodes };
+}
+
+/**
+ * Changes after `state` (starting from the snapshot instead when the server has pruned
+ * what `state` needs). Returns the state to replay them onto.
+ */
+async function changesSince(keyring: Keyring, transport: Transport, collectionId: string, state: CollectionState) {
+  try {
+    return { base: state, changes: await transport.pull(collectionId, state.cursor) };
+  } catch (error) {
+    if (!(error instanceof PrunedError)) throw error;
+    const base = await snapshotState(keyring, transport, collectionId);
+    return { base, changes: await transport.pull(collectionId, base.cursor) };
+  }
+}
+
 const countNative = (node: NativeNode): number =>
   (node.children ?? []).reduce((sum, child) => sum + 1 + countNative(child), 0);
 
@@ -117,11 +155,19 @@ export async function syncCollection(input: {
   discardDeletes?: boolean;
 }): Promise<SyncResult> {
   const { collectionId, keyring, transport, mount } = input;
-  const model: Model = new Map(Object.entries(input.collection.nodes));
-  let { cursor, lastHash } = input.collection;
+  // A new device starts from the latest snapshot instead of replaying the whole log.
+  const start = input.collection.cursor === 0 ? await snapshotState(keyring, transport, collectionId) : input.collection;
+  const model: Model = new Map(Object.entries(start.nodes));
+  let { cursor, lastHash } = start;
   let unreadable = 0;
   const pull = async () => {
-    const changes = await transport.pull(collectionId, cursor);
+    const { base, changes } = await changesSince(keyring, transport, collectionId, { cursor, lastHash, nodes: {} });
+    if (base.cursor !== cursor) {
+      // Offline for longer than the server keeps history: continue from its snapshot.
+      model.clear();
+      for (const [id, node] of Object.entries(base.nodes)) model.set(id, node);
+      ({ cursor, lastHash } = base);
+    }
     const replayed = await replay(model, keyring, collectionId, changes, lastHash);
     unreadable += replayed.unreadable;
     lastHash = replayed.lastHash;
@@ -187,6 +233,7 @@ export async function syncCollection(input: {
 /**
  * Restores a collection to how it was before change `beforeSeq`, by pushing a new change
  * that undoes everything since. History stays intact, so a restore can itself be undone.
+ * Points older than the server's history (before its snapshot) can't be restored.
  */
 export async function restoreCollection(input: {
   collectionId: string;
@@ -196,14 +243,15 @@ export async function restoreCollection(input: {
 }): Promise<number> {
   const { collectionId, keyring, transport, beforeSeq } = input;
   for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
-    const changes = await transport.pull(collectionId, 0);
-    const current: Model = new Map();
-    const target: Model = new Map();
-    const { lastHash } = await replay(current, keyring, collectionId, changes, "");
-    await replay(target, keyring, collectionId, changes.filter((c) => c.seq < beforeSeq), "");
+    const { base, changes } = await changesSince(keyring, transport, collectionId, emptyCollectionState());
+    if (beforeSeq <= base.cursor) throw new Error("That point is older than the history the server keeps");
+    const current: Model = new Map(Object.entries(base.nodes));
+    const target: Model = new Map(Object.entries(base.nodes));
+    const { lastHash } = await replay(current, keyring, collectionId, changes, base.lastHash);
+    await replay(target, keyring, collectionId, changes.filter((c) => c.seq < beforeSeq), base.lastHash);
     const ops = diffModels(current, target);
     if (ops.length === 0) return 0;
-    const head = changes.at(-1)?.seq ?? 0;
+    const head = changes.at(-1)?.seq ?? base.cursor;
     if (await transport.push(collectionId, await sealChange(keyring, collectionId, lastHash, ops), head)) return ops.length;
   }
   throw new Error("The collection kept changing during restore; try again");
