@@ -1,5 +1,5 @@
 /** Everything the extension persists, in `storage.local`. */
-import type { CollectionState, MountMode, MountState, Pause } from "@browserlace/core";
+import type { CollectionState, DeviceKey, MountMode, MountState, Pause, StoredKeyring } from "@browserlace/core";
 import { storage } from "wxt/utils/storage";
 
 export type Config = {
@@ -8,8 +8,10 @@ export type Config = {
   deviceId: string;
   token: string;
   deviceName: string;
-  /** Base64url account key. Never leaves this device except wrapped in a pairing. */
-  accountKey: string;
+  /** The account's keys, one per epoch. Never leaves this device except wrapped in a pairing. */
+  keyring: StoredKeyring;
+  /** This device's key pair; other devices grant it new epoch keys. */
+  deviceKey: DeviceKey;
 };
 
 export type MountConfig = { folderId: string; mode: MountMode; paused?: Pause };
@@ -37,7 +39,7 @@ export const shareTabsItem = storage.defineItem<boolean>("local:shareTabs", { fa
 export const lastTabsItem = storage.defineItem<string>("local:lastTabs", { fallback: "" });
 
 export const collectionStateItem = (id: string) =>
-  storage.defineItem<CollectionState>(`local:collection:${id}`, { fallback: { cursor: 0, nodes: {} } });
+  storage.defineItem<CollectionState>(`local:collection:${id}`, { fallback: { cursor: 0, lastHash: "", nodes: {} } });
 export const mountStateItem = (id: string) =>
   storage.defineItem<MountState>(`local:mount:${id}`, { fallback: { links: {}, baseline: {} } });
 

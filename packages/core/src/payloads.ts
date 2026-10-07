@@ -18,11 +18,15 @@ const nodeFields = z
   })
   .partial();
 
-/** One batch of ops, written by one device in one sync. */
+/**
+ * One batch of ops, written by one device in one sync. `prev` is the hash of the change
+ * before it in the log (empty for the first), so a server can't reorder or replay changes.
+ */
 export const changePayload = z.object({
-  v: z.literal(1),
+  v: z.literal(2),
+  prev: z.string(),
   ops: z.array(z.object({ id: z.string(), set: nodeFields })),
-}) satisfies z.ZodType<{ v: 1; ops: Op[] }>;
+}) satisfies z.ZodType<{ v: 2; prev: string; ops: Op[] }>;
 
 export const collectionMeta = z.object({ v: z.literal(1), name: z.string().min(1) });
 export type CollectionMeta = z.output<typeof collectionMeta>;

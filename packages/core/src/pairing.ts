@@ -1,15 +1,23 @@
 /**
  * Device pairing. An existing device shows a one-time code; the new device types it in.
  * Both sides derive two values from the code with HKDF: a lookup id the server uses to
- * find the pairing, and a wrapping key that encrypts the account key. The server sees
- * neither the code nor the account key, and the code's 80 bits make guessing it from the
- * lookup id infeasible.
+ * find the pairing, and a wrapping key that encrypts the account keyring. The server sees
+ * neither the code nor the keys, and the code's 80 bits make guessing it from the lookup
+ * id infeasible.
  */
-import { fromBase64Url, open, seal, toBase64Url } from "./crypto.ts";
-import { z } from "zod";
+import { openWithKey, sealWithKey, storedKeyring, toBase64Url, type StoredKeyring } from "./crypto.ts";
 
-const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32: no I, L, O, U
+/** Crockford base32: no I, L, O, U. */
+export const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CODE_LENGTH = 16;
+
+/** Uppercases and strips separators, mapping look-alikes (O → 0, I/L → 1). */
+export const normalizeBase32 = (input: string) =>
+  input
+    .toUpperCase()
+    .replace(/[\s-]/g, "")
+    .replace(/O/g, "0")
+    .replace(/[IL]/g, "1");
 
 /** A fresh code, formatted for display as `XXXX-XXXX-XXXX-XXXX`. */
 export function generatePairingCode(): string {
@@ -19,11 +27,7 @@ export function generatePairingCode(): string {
 
 /** Canonical form of a typed code, forgiving case, separators and look-alikes. `null` if invalid. */
 export function normalizePairingCode(input: string): string | null {
-  const code = input
-    .toUpperCase()
-    .replace(/[\s-]/g, "")
-    .replace(/O/g, "0")
-    .replace(/[IL]/g, "1");
+  const code = normalizeBase32(input);
   return code.length === CODE_LENGTH && [...code].every((c) => ALPHABET.includes(c)) ? code : null;
 }
 
@@ -48,21 +52,17 @@ async function derive(code: string) {
   return { lookupId, wrapKey };
 }
 
-const wrappedSchema = z.object({ accountKey: z.string() });
-
 /** Run on the existing device: what to upload so the code can be redeemed. */
-export async function wrapAccountKey(code: string, accountKey: string) {
+export async function wrapKeyring(code: string, keyring: StoredKeyring) {
   const { lookupId, wrapKey } = await derive(code);
-  return { lookupId, wrappedKey: await seal(wrapKey, { accountKey }, `pairing:${lookupId}`) };
+  return { lookupId, wrappedKey: await sealWithKey(wrapKey, keyring, `pairing:${lookupId}`) };
 }
 
 /** Run on the new device: the lookup id to claim with. */
 export const pairingLookupId = async (code: string) => (await derive(code)).lookupId;
 
-/** Run on the new device after claiming: recovers the account key. */
-export async function unwrapAccountKey(code: string, wrappedKey: string): Promise<string> {
+/** Run on the new device after claiming: recovers the account keyring. */
+export async function unwrapKeyring(code: string, wrappedKey: string): Promise<StoredKeyring> {
   const { lookupId, wrapKey } = await derive(code);
-  const { accountKey } = await open(wrapKey, wrappedKey, `pairing:${lookupId}`, wrappedSchema);
-  if (fromBase64Url(accountKey).length !== 32) throw new Error("Malformed account key");
-  return accountKey;
+  return openWithKey(wrapKey, wrappedKey, `pairing:${lookupId}`, storedKeyring);
 }

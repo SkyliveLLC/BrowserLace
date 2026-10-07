@@ -20,6 +20,8 @@ for how it works and what's deliberately left out.
   up where you left off without merging every session together.
 - **Safety:** large deletions pause until you confirm, and every collection keeps a
   history you can restore from.
+- **Your keys, your devices:** removing a device rotates the encryption key so it can't
+  read anything new, and a printable recovery key gets you back in if you lose them all.
 - **Safari** can't edit its bookmarks from an extension (Apple doesn't expose the API), so
   there collections open from the toolbar popup instead. Tabs work fully.
 
@@ -43,6 +45,12 @@ pnpm typecheck
 
 pnpm dev:server      # http://localhost:8787, database in apps/server/browserlace.db
 pnpm dev:extension   # launches Chrome with the extension loaded (WXT dev mode)
+```
+
+End-to-end runs drive isolated browser profiles (never yours) against a throwaway server:
+
+```sh
+pnpm build && pnpm --filter @browserlace/e2e chromium
 ```
 
 `pnpm --filter @browserlace/extension dev:firefox` does the same for Firefox. Set

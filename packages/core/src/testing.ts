@@ -1,5 +1,5 @@
 /** In-memory browser and server used by the sync tests. Not exported from the package. */
-import { generateAccountKey, importAccountKey } from "./crypto.ts";
+import { createKeyring, importKeyring, type Keyring } from "./crypto.ts";
 import { emptyMountState, type MountState, type NativeBookmarks, type NativeNode } from "./reconcile.ts";
 import { emptyCollectionState, syncCollection, type Change, type CollectionState, type MountMode, type Transport } from "./sync.ts";
 
@@ -127,7 +127,7 @@ export class Device {
 
   constructor(
     private server: FakeServer,
-    private key: CryptoKey,
+    private keyring: Keyring,
     public mode: MountMode = "two-way",
     public folderId = "root",
   ) {}
@@ -135,7 +135,7 @@ export class Device {
   async sync(options: { allowDeletes?: boolean; discardDeletes?: boolean } = {}) {
     const result = await syncCollection({
       collectionId: "c1",
-      key: this.key,
+      keyring: this.keyring,
       transport: this.server,
       collection: this.collection,
       mount: { native: this.browser, folderId: this.folderId, mode: this.mode, state: this.mountState },
@@ -148,5 +148,5 @@ export class Device {
 }
 
 export async function setup() {
-  return { server: new FakeServer(), key: await importAccountKey(generateAccountKey()) };
+  return { server: new FakeServer(), keyring: await importKeyring(createKeyring()) };
 }

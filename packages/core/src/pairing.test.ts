@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { generateAccountKey, importAccountKey, open, seal } from "./crypto.ts";
-import { generatePairingCode, normalizePairingCode, pairingLookupId, unwrapAccountKey, wrapAccountKey } from "./pairing.ts";
+import { createKeyring, importKeyring, open, seal } from "./crypto.ts";
+import { generatePairingCode, normalizePairingCode, pairingLookupId, unwrapKeyring, wrapKeyring } from "./pairing.ts";
 import { collectionMeta } from "./payloads.ts";
 
 describe("pairing", () => {
-  it("hands the account key to a device that knows the code", async () => {
+  it("hands the keyring to a device that knows the code", async () => {
     const code = generatePairingCode();
-    const accountKey = generateAccountKey();
-    const { lookupId, wrappedKey } = await wrapAccountKey(code, accountKey);
+    const keyring = createKeyring();
+    const { lookupId, wrappedKey } = await wrapKeyring(code, keyring);
 
     const typed = code.toLowerCase().replaceAll("-", " ");
     expect(await pairingLookupId(typed)).toBe(lookupId);
-    expect(await unwrapAccountKey(typed, wrappedKey)).toBe(accountKey);
+    expect(await unwrapKeyring(typed, wrappedKey)).toEqual(keyring);
   });
 
   it("rejects the wrong code", async () => {
-    const { wrappedKey } = await wrapAccountKey(generatePairingCode(), generateAccountKey());
-    await expect(unwrapAccountKey(generatePairingCode(), wrappedKey)).rejects.toThrow();
+    const { wrappedKey } = await wrapKeyring(generatePairingCode(), createKeyring());
+    await expect(unwrapKeyring(generatePairingCode(), wrappedKey)).rejects.toThrow();
   });
 
   it("normalizes look-alike characters and rejects malformed codes", () => {
@@ -28,10 +28,10 @@ describe("pairing", () => {
 
 describe("seal/open", () => {
   it("refuses a blob moved to a different context", async () => {
-    const key = await importAccountKey(generateAccountKey());
-    const blob = await seal(key, { v: 1, name: "Work" }, "meta:a");
+    const keyring = await importKeyring(createKeyring());
+    const blob = await seal(keyring, { v: 1, name: "Work" }, "meta:a");
 
-    expect(await open(key, blob, "meta:a", collectionMeta)).toEqual({ v: 1, name: "Work" });
-    await expect(open(key, blob, "meta:b", collectionMeta)).rejects.toThrow();
+    expect(await open(keyring, blob, "meta:a", collectionMeta)).toEqual({ v: 1, name: "Work" });
+    await expect(open(keyring, blob, "meta:b", collectionMeta)).rejects.toThrow();
   });
 });

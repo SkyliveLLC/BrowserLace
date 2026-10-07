@@ -2,7 +2,7 @@
  * One sync pass for one collection: pull the log, push local edits from the mounted
  * folder (if any), pull again, then make the folder match the model.
  */
-import { open, seal } from "./crypto.ts";
+import { hashBlob, MissingKeyError, open, seal, type Keyring } from "./crypto.ts";
 import { applyOps, buildTree, diffModels, type Model, type NodeFields, type Op } from "./model.ts";
 import { changePayload, contexts } from "./payloads.ts";
 import {
@@ -28,9 +28,17 @@ export interface Transport {
   pull(collectionId: string, after: number): Promise<Change[]>;
 }
 
-/** The replayed model plus the last applied seq, persisted per collection. */
-export type CollectionState = { cursor: number; nodes: Record<string, Partial<NodeFields>> };
-export const emptyCollectionState = (): CollectionState => ({ cursor: 0, nodes: {} });
+/** The replayed model plus the last applied seq and its hash, persisted per collection. */
+export type CollectionState = { cursor: number; lastHash: string; nodes: Record<string, Partial<NodeFields>> };
+export const emptyCollectionState = (): CollectionState => ({ cursor: 0, lastHash: "", nodes: {} });
+
+/** The log doesn't chain: the server reordered, replayed or dropped changes. */
+export class TamperError extends Error {
+  constructor(seq: number) {
+    super(`The server sent change ${seq} out of order. Syncing this collection is stopped to protect it.`);
+    this.name = "TamperError";
+  }
+}
 
 export type MountMode = "two-way" | "receive";
 export type Mount = { native: NativeBookmarks; folderId: string; mode: MountMode; state: MountState };
@@ -57,24 +65,36 @@ export const DELETE_GUARD = { min: 10, ratio: 0.25 };
 const needsConfirmation = (count: number, total: number) =>
   count >= DELETE_GUARD.min && count > total * DELETE_GUARD.ratio;
 
-export const sealChange = (key: CryptoKey, collectionId: string, ops: Op[]) =>
-  seal(key, { v: 1, ops }, contexts.change(collectionId));
+export const sealChange = (keyring: Keyring, collectionId: string, prev: string, ops: Op[]) =>
+  seal(keyring, { v: 2, prev, ops }, contexts.change(collectionId));
 
-export const openChange = async (key: CryptoKey, collectionId: string, blob: string): Promise<Op[]> =>
-  (await open(key, blob, contexts.change(collectionId), changePayload)).ops;
+export const openChange = (keyring: Keyring, collectionId: string, blob: string) =>
+  open(keyring, blob, contexts.change(collectionId), changePayload);
 
 /**
- * Replays changes into `model`. A change that can't be read is skipped rather than
- * blocking the collection forever; every device skips the same one, so they still agree.
+ * Replays changes into `model`, checking each one names the hash of the change before it.
+ * A change that can't be read is skipped rather than blocking the collection forever;
+ * every device skips the same one, so they still agree. It still counts for the chain.
+ * A change sealed under a key this device hasn't received yet throws `MissingKeyError`,
+ * which fails the whole sync without saving anything, so the change is retried later.
  */
-async function replay(model: Model, key: CryptoKey, collectionId: string, changes: Change[]) {
+async function replay(model: Model, keyring: Keyring, collectionId: string, changes: Change[], lastHash: string) {
   let unreadable = 0;
   for (const change of changes) {
-    const ops = await openChange(key, collectionId, change.blob).catch(() => null);
-    if (ops) applyOps(model, ops);
-    else unreadable++;
+    // A key we don't have yet isn't "unreadable": stop, so the change is retried rather than skipped.
+    const payload = await openChange(keyring, collectionId, change.blob).catch((error: unknown) => {
+      if (error instanceof MissingKeyError) throw error;
+      return null;
+    });
+    if (payload) {
+      if (payload.prev !== lastHash) throw new TamperError(change.seq);
+      applyOps(model, payload.ops);
+    } else {
+      unreadable++;
+    }
+    lastHash = await hashBlob(change.blob);
   }
-  return unreadable;
+  return { unreadable, lastHash };
 }
 
 const countNative = (node: NativeNode): number =>
@@ -82,7 +102,7 @@ const countNative = (node: NativeNode): number =>
 
 export async function syncCollection(input: {
   collectionId: string;
-  key: CryptoKey;
+  keyring: Keyring;
   transport: Transport;
   collection: CollectionState;
   mount?: Mount | undefined;
@@ -91,17 +111,19 @@ export async function syncCollection(input: {
   /** Don't push local deletes; the model puts those bookmarks back instead. */
   discardDeletes?: boolean;
 }): Promise<SyncResult> {
-  const { collectionId, key, transport, mount } = input;
+  const { collectionId, keyring, transport, mount } = input;
   const model: Model = new Map(Object.entries(input.collection.nodes));
-  let cursor = input.collection.cursor;
+  let { cursor, lastHash } = input.collection;
   let unreadable = 0;
   const pull = async () => {
     const changes = await transport.pull(collectionId, cursor);
-    unreadable += await replay(model, key, collectionId, changes);
+    const replayed = await replay(model, keyring, collectionId, changes, lastHash);
+    unreadable += replayed.unreadable;
+    lastHash = replayed.lastHash;
     cursor = changes.at(-1)?.seq ?? cursor;
   };
   const result = (rest: Omit<SyncResult, "collection" | "pushed"> & { pushed?: number } = {}): SyncResult => ({
-    collection: { cursor, nodes: Object.fromEntries(model) },
+    collection: { cursor, lastHash, nodes: Object.fromEntries(model) },
     pushed: 0,
     ...(unreadable ? { unreadable } : {}),
     ...rest,
@@ -122,7 +144,7 @@ export async function syncCollection(input: {
       return result({ mount: mount.state, paused: { reason: "local-deletes", count: local.deletes } });
     }
     const head = cursor;
-    const accepted = await transport.push(collectionId, await sealChange(key, collectionId, ops), head);
+    const accepted = await transport.push(collectionId, await sealChange(keyring, collectionId, lastHash, ops), head);
     await pull();
     if (accepted) {
       pushed = ops.length;
@@ -150,21 +172,21 @@ export async function syncCollection(input: {
  */
 export async function restoreCollection(input: {
   collectionId: string;
-  key: CryptoKey;
+  keyring: Keyring;
   transport: Transport;
   beforeSeq: number;
 }): Promise<number> {
-  const { collectionId, key, transport, beforeSeq } = input;
+  const { collectionId, keyring, transport, beforeSeq } = input;
   for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
     const changes = await transport.pull(collectionId, 0);
     const current: Model = new Map();
     const target: Model = new Map();
-    await replay(current, key, collectionId, changes);
-    await replay(target, key, collectionId, changes.filter((c) => c.seq < beforeSeq));
+    const { lastHash } = await replay(current, keyring, collectionId, changes, "");
+    await replay(target, keyring, collectionId, changes.filter((c) => c.seq < beforeSeq), "");
     const ops = diffModels(current, target);
     if (ops.length === 0) return 0;
     const head = changes.at(-1)?.seq ?? 0;
-    if (await transport.push(collectionId, await sealChange(key, collectionId, ops), head)) return ops.length;
+    if (await transport.push(collectionId, await sealChange(keyring, collectionId, lastHash, ops), head)) return ops.length;
   }
   throw new Error("The collection kept changing during restore; try again");
 }

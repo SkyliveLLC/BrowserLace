@@ -144,7 +144,8 @@ button.link {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: var(--text);
   background: var(--bg);
@@ -156,6 +157,7 @@ select {
 
 input:focus,
 select:focus,
+textarea:focus,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -211,6 +213,12 @@ label.inline {
 .code {
   font: 600 22px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
   letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
+}
+
+textarea.code {
+  font-size: 14px;
+  resize: vertical;
 }
 
 .tag {

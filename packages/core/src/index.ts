@@ -1,4 +1,5 @@
 export * from "./crypto.ts";
+export * from "./keys.ts";
 export * from "./model.ts";
 export * from "./pairing.ts";
 export * from "./payloads.ts";

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { restoreCollection } from "./sync.ts";
+import { generateKey, importKeyring, MissingKeyError, mergeKeyring } from "./crypto.ts";
+import { restoreCollection, TamperError } from "./sync.ts";
 import { Device, setup } from "./testing.ts";
 
 async function pair(mode: "two-way" | "receive" = "two-way") {
-  const { server, key } = await setup();
-  return { server, key, a: new Device(server, key), b: new Device(server, key, mode) };
+  const { server, keyring } = await setup();
+  return { server, keyring, a: new Device(server, keyring), b: new Device(server, keyring, mode) };
 }
 
 describe("syncCollection", () => {
@@ -223,6 +224,40 @@ describe("syncCollection", () => {
     expect(b.browser.outline()).toEqual(["one https://one.example", "two https://two.example"]);
   });
 
+  it("stops when the server reorders changes", async () => {
+    const { a, b, server } = await pair();
+    await a.browser.add("root", "one", "https://one.example");
+    await a.sync();
+    await a.browser.add("root", "two", "https://two.example");
+    await a.sync();
+
+    const [first, second] = server.logs.get("c1")!;
+    [first!.blob, second!.blob] = [second!.blob, first!.blob];
+    await expect(b.sync()).rejects.toThrow(TamperError);
+  });
+
+  it("stops when the server replays an old change", async () => {
+    const { a, b, server } = await pair();
+    await a.browser.add("root", "one", "https://one.example");
+    await a.sync();
+    await b.sync();
+
+    const log = server.logs.get("c1")!;
+    log.push({ ...log[0]!, seq: 2 });
+    await expect(b.sync()).rejects.toThrow(TamperError);
+  });
+
+  it("waits for a key it doesn't have yet instead of skipping the change", async () => {
+    const { server, keyring, a } = await pair();
+    const epoch2 = await importKeyring(mergeKeyring(keyring.stored, { 2: generateKey() }));
+    const b = new Device(server, epoch2);
+    await b.browser.add("root", "new key", "https://new.example");
+    await b.sync();
+
+    await expect(a.sync()).rejects.toThrow(MissingKeyError);
+    expect(a.collection.cursor).toBe(0);
+  });
+
   it("adopts matching bookmarks instead of duplicating them on first mount", async () => {
     const { a, b } = await pair();
     for (const browser of [a.browser, b.browser]) {
@@ -301,7 +336,7 @@ describe("syncCollection", () => {
   });
 
   it("restores a collection to before a change", async () => {
-    const { a, b, server, key } = await pair();
+    const { a, b, server, keyring } = await pair();
     const folder = await a.browser.add("root", "Research");
     await a.browser.add(folder, "Paper", "https://paper.example");
     await a.sync();
@@ -311,7 +346,7 @@ describe("syncCollection", () => {
     await a.browser.add("root", "Later", "https://later.example");
     await a.sync();
 
-    await restoreCollection({ collectionId: "c1", key, transport: server, beforeSeq: before });
+    await restoreCollection({ collectionId: "c1", keyring, transport: server, beforeSeq: before });
     await a.sync();
     await b.sync();
 
