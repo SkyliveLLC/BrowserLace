@@ -47,6 +47,29 @@ const migrations = [
     expires_at integer not null
   );
   `,
+  // Keyring epochs, device keys, grants and recovery keys (see packages/core/src/keys.ts).
+  `
+  alter table accounts add column key_epoch integer not null default 1;
+  alter table accounts add column rotation_needed integer not null default 0;
+  alter table devices add column public_key text;
+  alter table devices add column key_proof text;
+  alter table devices add column key_proof_epoch integer;
+  create table recovery (
+    account_id text primary key references accounts(id) on delete cascade,
+    lookup_id text not null unique,
+    public_key text not null,
+    key_proof text not null,
+    key_proof_epoch integer not null,
+    created_at integer not null
+  );
+  create table grants (
+    account_id text not null references accounts(id) on delete cascade,
+    recipient_id text not null,
+    epoch integer not null,
+    blob text not null,
+    primary key (account_id, recipient_id, epoch)
+  ) without rowid;
+  `,
 ];
 
 export type Database = DatabaseSync;
@@ -64,4 +87,17 @@ export function openDatabase(path: string): Database {
     db.exec("commit");
   }
   return db;
+}
+
+/** Runs `fn` in a write transaction, rolling back if it throws. */
+export function transaction<T>(db: Database, fn: () => T): T {
+  db.exec("begin immediate");
+  try {
+    const result = fn();
+    db.exec("commit");
+    return result;
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
 }

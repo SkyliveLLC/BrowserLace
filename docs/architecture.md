@@ -85,25 +85,43 @@ more than 25% of the folder, the mount pauses before pushing anything. The user 
 confirms or puts the bookmarks back (the next pass pushes everything except the deletes,
 and the model recreates the missing bookmarks).
 
-## Encryption and pairing (`crypto.ts`, `pairing.ts`)
+## Encryption, keys and recovery (`crypto.ts`, `keys.ts`, `pairing.ts`)
 
-- Every blob (change, collection name, tab snapshot) is AES-256-GCM with a random IV, plus
-  additional data naming its context (`change:<collectionId>`, `meta:<id>`,
-  `tabs:<deviceId>`), so the server can't move a blob somewhere else.
+- **Keyring.** An account has one 256-bit key per **epoch**. Every blob (change,
+  collection name, tab snapshot) is AES-256-GCM under the current epoch, with a header
+  naming the epoch, and additional data naming its context (`change:<collectionId>`,
+  `meta:<id>`, `tabs:<deviceId>`) so the server can't move a blob somewhere else.
 - **Pairing:** an existing device shows a one-time 16-character code (80 bits). Both
   devices derive two values from it with HKDF: a lookup id, which the server uses to find
-  the pairing, and a wrapping key, which encrypts the account key. The server never sees
-  the code or the key. Pairings expire after 10 minutes and work once.
+  the pairing, and a wrapping key, which encrypts the keyring. The server never sees the
+  code or the keys. Pairings expire after 10 minutes and work once.
+- **Device keys.** Each device has an X25519 key pair and registers the public key with
+  an **attestation**: an HMAC under an epoch key, which only account devices can make.
+- **Removing a device starts a new epoch.** The server flags the account, and the next
+  device to sync generates a key, wraps it for every remaining device whose attestation
+  checks out (ephemeral X25519 → HKDF → AES-GCM, a **grant**), re-attests them under the
+  new epoch and re-seals collection names. Each grant carries a proof under the previous
+  epoch, so a device only accepts keys an account device made. Only one device can start
+  an epoch; the others pick up its grants. Old changes stay under old epochs (the removed
+  device already had them); it can't read anything written afterwards. A device that
+  joins with an older keyring waits until another device starts an epoch that includes it.
+- **Recovery key.** 32 random bytes, shown once as Crockford base32. It acts as a device
+  on paper: the bytes are an X25519 private key that receives grants like any device, and
+  an HKDF-derived lookup id lets a new browser find the account and claim a device token.
+  Its first grant (the whole keyring) is authenticated with a MAC derived from the
+  recovery key itself. Creating a new one replaces the old.
+- **Tamper-evident logs.** Each change names the SHA-256 of the change before it (of the
+  ciphertext, so an unreadable change still links the chain). A device that sees a
+  change out of order, replayed or missing stops syncing that collection and says why.
 - Device tokens are random 256-bit bearer tokens. The server stores only their SHA-256.
 
-The server sees: device names and browsers, when changes happen and how big they are,
-and which device wrote them. Nothing else.
+The server sees: device names and browsers, public keys, when changes happen and how big
+they are, and which device wrote them. Nothing else.
 
-Known gaps in what a *malicious* server could do: it can't read or forge changes, but it
-could withhold, replay or reorder them (encryption binds a change to its collection, not
-to its position in the log), and a removed device keeps the account key since keys aren't
-rotated. Fixing both means chaining changes by hash inside the ciphertext and rotating the
-key when a device is removed.
+What a *malicious* server can still do: withhold the newest changes (a device can't tell
+"nothing new" from "hidden"), or show different devices different logs. And if it
+colludes with a removed device, it could slip in a device of its own between the removal
+and the next epoch; every device is listed in settings, so it would show there.
 
 ## Server (`apps/server`)
 
@@ -132,8 +150,6 @@ The extension imports the server's route types (`AppType`) for a fully typed cli
 
 - History, passwords, cookies, extensions and settings sync.
 - Native Safari bookmarks (would need a macOS helper app using private APIs).
-- Account recovery: losing every paired device loses the key. A printable recovery key is
-  the planned fix.
 - Log compaction: new devices replay the full log, which is fine at bookmark scale.
 - Live push (WebSocket). MV3 service workers make long-lived connections fiddly, and a
   1-minute alarm plus event triggers is enough for bookmarks.

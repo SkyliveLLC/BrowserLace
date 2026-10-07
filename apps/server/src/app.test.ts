@@ -122,3 +122,74 @@ describe("tabs", () => {
     expect((await (await client.v1.tabs.$get({}, as(other.token))).json()).tabs).toEqual([]);
   });
 });
+
+describe("keys", () => {
+  const PUBLIC = "p".repeat(43);
+  const PROOF = "q".repeat(43);
+  const GRANT = `${"e".repeat(43)}.sealed`;
+
+  it("asks for a new epoch after a device is removed, and lets only one device start it", async () => {
+    const { client, as, signup } = setup();
+    const first = await signup();
+    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped" } }, as(first.token));
+    const second = await (await client.v1.pairings.claim.$post({ json: { lookupId: LOOKUP, name: "B", browser: "firefox" } })).json();
+    for (const device of [first, second]) {
+      await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 1 } }, as(device.token));
+    }
+    const keys = () => client.v1.keys.$get({}, as(first.token)).then((r) => r.json());
+    expect(await keys()).toMatchObject({ epoch: 1, rotationNeeded: false });
+
+    await client.v1.devices[":id"].$delete({ param: { id: second.deviceId } }, as(first.token));
+    expect((await keys()).rotationNeeded).toBe(true);
+
+    const rotate = () =>
+      client.v1.keys.$post(
+        {
+          json: {
+            epoch: 2,
+            grants: [
+              { recipientId: first.deviceId, blob: GRANT },
+              { recipientId: second.deviceId, blob: GRANT },
+            ],
+            attestations: [{ recipientId: first.deviceId, proof: PROOF }],
+            metas: [],
+          },
+        },
+        as(first.token),
+      );
+    expect((await rotate()).status).toBe(200);
+    expect((await rotate()).status).toBe(409);
+    expect(await keys()).toMatchObject({
+      epoch: 2,
+      rotationNeeded: false,
+      grants: [{ epoch: 2, blob: GRANT }],
+      holders: [{ id: first.deviceId, proofEpoch: 2 }],
+    });
+  });
+
+  it("asks for a new epoch when a device joins with an older keyring", async () => {
+    const { client, as, signup } = setup();
+    const first = await signup();
+    await client.v1.keys.$post({ json: { epoch: 2, grants: [], attestations: [], metas: [] } }, as(first.token));
+    await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 1 } }, as(first.token));
+
+    expect((await (await client.v1.keys.$get({}, as(first.token))).json()).rotationNeeded).toBe(true);
+    const again = await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 2 } }, as(first.token));
+    expect(again.status).toBe(409);
+  });
+
+  it("lets a recovery key sign in a new device and hands it the recovery grants", async () => {
+    const { client, as, signup } = setup();
+    const first = await signup();
+    const setRecovery = (lookupId: string) =>
+      client.v1.recovery.$put({ json: { lookupId, publicKey: PUBLIC, proof: PROOF, proofEpoch: 1, epoch: 1, grant: GRANT } }, as(first.token));
+    await setRecovery("r".repeat(43));
+    await setRecovery(LOOKUP);
+
+    const claim = (lookupId: string) => client.v1.recovery.claim.$post({ json: { lookupId, name: "New", browser: "chrome" } });
+    expect((await claim("r".repeat(43))).status).toBe(404);
+    const res = await claim(LOOKUP);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ accountId: first.accountId, grants: [{ epoch: 1, blob: GRANT }] });
+  });
+});

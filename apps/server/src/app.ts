@@ -12,7 +12,7 @@ import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { Database } from "./db.ts";
+import { transaction, type Database } from "./db.ts";
 
 /** Validates a request part, answering 400 itself so error shapes stay out of the client types. */
 const valid = <Target extends keyof ValidationTargets, Schema extends z.ZodType>(target: Target, schema: Schema) =>
@@ -24,6 +24,13 @@ const valid = <Target extends keyof ValidationTargets, Schema extends z.ZodType>
 const blob = (maxLength: number) => z.string().min(1).max(maxLength).regex(/^[\w-]+$/);
 const deviceInfo = z.object({ name: z.string().trim().min(1).max(80), browser: z.string().trim().min(1).max(40) });
 const lookupId = z.string().length(43).regex(/^[\w-]+$/);
+/** A 32-byte value in base64url: X25519 public keys and HMAC attestations. */
+const key32 = z.string().length(43).regex(/^[\w-]+$/);
+const epoch = z.number().int().positive();
+/** `<ephemeral public key>.<ciphertext>`, as produced by the core package's `sealGrant`. */
+const grantBlob = z.string().max(65_536).regex(/^[\w-]{43}\.[\w-]+$/);
+/** Grants and attestations for the recovery key use this recipient id instead of a device id. */
+const RECOVERY = "recovery";
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const PULL_PAGE = 500;
@@ -101,6 +108,18 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       },
     )
 
+    .post("/v1/recovery/claim", valid("json", deviceInfo.extend({ lookupId })), (c) => {
+      const { lookupId, ...info } = c.req.valid("json");
+      const recovery = db.prepare("select account_id from recovery where lookup_id = ?").get(lookupId) as
+        | { account_id: string }
+        | undefined;
+      if (!recovery) throw new HTTPException(404, { message: "No account uses that recovery key" });
+      const grants = db
+        .prepare("select epoch, blob from grants where account_id = ? and recipient_id = ? order by epoch")
+        .all(recovery.account_id, RECOVERY) as { epoch: number; blob: string }[];
+      return c.json({ ...issueDevice(recovery.account_id, info), grants }, 201);
+    })
+
     .use("/v1/*", auth)
 
     .post("/v1/pairings", valid("json", z.object({ lookupId, wrappedKey: blob(1024) })), (c) => {
@@ -131,11 +150,136 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
     })
 
     .delete("/v1/devices/:id", valid("param", z.object({ id: z.uuid() })), (c) => {
-      const { changes } = db
-        .prepare("delete from devices where id = ? and account_id = ?")
-        .run(c.req.valid("param").id, c.var.device.account_id);
-      if (changes === 0) throw new HTTPException(404, { message: "Device not found" });
+      const { id } = c.req.valid("param");
+      const accountId = c.var.device.account_id;
+      transaction(db, () => {
+        const { changes } = db.prepare("delete from devices where id = ? and account_id = ?").run(id, accountId);
+        if (changes === 0) throw new HTTPException(404, { message: "Device not found" });
+        db.prepare("delete from grants where account_id = ? and recipient_id = ?").run(accountId, id);
+        // The removed device knows the current key, so the next device to sync starts a new epoch.
+        db.prepare("update accounts set rotation_needed = 1 where id = ?").run(accountId);
+      });
       return c.json({ ok: true });
+    })
+
+    /** Registers this device's public key, once, with an attestation from the keyring. */
+    .put("/v1/devices/me/key", valid("json", z.object({ publicKey: key32, proof: key32, proofEpoch: epoch })), (c) => {
+      const { publicKey, proof, proofEpoch } = c.req.valid("json");
+      const { changes } = db
+        .prepare("update devices set public_key = ?, key_proof = ?, key_proof_epoch = ? where id = ? and public_key is null")
+        .run(publicKey, proof, proofEpoch, c.var.device.id);
+      if (changes === 0) throw new HTTPException(409, { message: "This device already has a key" });
+      // Paired with a keyring older than the account's: only a new epoch can include this device.
+      db.prepare("update accounts set rotation_needed = 1 where id = ? and key_epoch > ?").run(c.var.device.account_id, proofEpoch);
+      return c.json({ ok: true });
+    })
+
+    /** The account's key state: current epoch, grants for this device, and who can receive new keys. */
+    .get("/v1/keys", (c) => {
+      const accountId = c.var.device.account_id;
+      const account = db.prepare("select key_epoch, rotation_needed from accounts where id = ?").get(accountId) as {
+        key_epoch: number;
+        rotation_needed: number;
+      };
+      const grants = db
+        .prepare("select epoch, blob from grants where account_id = ? and recipient_id = ? order by epoch")
+        .all(accountId, c.var.device.id) as { epoch: number; blob: string }[];
+      const holders = db
+        .prepare(
+          `select id, public_key as publicKey, key_proof as proof, key_proof_epoch as proofEpoch
+           from devices where account_id = ? and public_key is not null
+           union all
+           select ?, public_key, key_proof, key_proof_epoch from recovery where account_id = ?`,
+        )
+        .all(accountId, RECOVERY, accountId) as { id: string; publicKey: string; proof: string; proofEpoch: number }[];
+      return c.json({ epoch: account.key_epoch, rotationNeeded: account.rotation_needed === 1, grants, holders });
+    })
+
+    /** Starts epoch `epoch`. Only one device can win; the rest get 409 and pick up the grants. */
+    .post(
+      "/v1/keys",
+      valid(
+        "json",
+        z.object({
+          epoch: epoch.min(2),
+          grants: z.array(z.object({ recipientId: z.string(), blob: grantBlob })).max(1000),
+          attestations: z.array(z.object({ recipientId: z.string(), proof: key32 })).max(1000),
+          metas: z.array(z.object({ collectionId: z.uuid(), meta: blob(4096) })).max(10_000),
+        }),
+      ),
+      (c) => {
+        const body = c.req.valid("json");
+        const accountId = c.var.device.account_id;
+        transaction(db, () => {
+          const { changes } = db
+            .prepare("update accounts set key_epoch = ?, rotation_needed = 0 where id = ? and key_epoch = ?")
+            .run(body.epoch, accountId, body.epoch - 1);
+          if (changes === 0) throw new HTTPException(409, { message: "Another device already started a new epoch" });
+          const isHolder = (id: string) =>
+            id === RECOVERY
+              ? db.prepare("select 1 from recovery where account_id = ?").get(accountId) !== undefined
+              : db.prepare("select 1 from devices where id = ? and account_id = ?").get(id, accountId) !== undefined;
+          for (const grant of body.grants) {
+            if (!isHolder(grant.recipientId)) continue;
+            db.prepare("insert into grants (account_id, recipient_id, epoch, blob) values (?, ?, ?, ?)").run(
+              accountId,
+              grant.recipientId,
+              body.epoch,
+              grant.blob,
+            );
+          }
+          for (const { recipientId, proof } of body.attestations) {
+            if (recipientId === RECOVERY) {
+              db.prepare("update recovery set key_proof = ?, key_proof_epoch = ? where account_id = ?").run(proof, body.epoch, accountId);
+            } else {
+              db.prepare("update devices set key_proof = ?, key_proof_epoch = ? where id = ? and account_id = ?").run(
+                proof,
+                body.epoch,
+                recipientId,
+                accountId,
+              );
+            }
+          }
+          for (const { collectionId, meta } of body.metas) {
+            db.prepare("update collections set meta = ? where id = ? and account_id = ?").run(meta, collectionId, accountId);
+          }
+        });
+        return c.json({ ok: true });
+      },
+    )
+
+    /** Sets (or replaces) the account's recovery key, granted the keyring as of `epoch`. */
+    .put(
+      "/v1/recovery",
+      valid("json", z.object({ lookupId, publicKey: key32, proof: key32, proofEpoch: epoch, epoch, grant: grantBlob })),
+      (c) => {
+        const body = c.req.valid("json");
+        const accountId = c.var.device.account_id;
+        transaction(db, () => {
+          const account = db.prepare("select key_epoch from accounts where id = ?").get(accountId) as { key_epoch: number };
+          if (account.key_epoch !== body.epoch) throw new HTTPException(409, { message: "Keys changed; sync and try again" });
+          db.prepare("delete from grants where account_id = ? and recipient_id = ?").run(accountId, RECOVERY);
+          db.prepare(
+            `insert into recovery (account_id, lookup_id, public_key, key_proof, key_proof_epoch, created_at) values (?, ?, ?, ?, ?, ?)
+             on conflict (account_id) do update set lookup_id = excluded.lookup_id, public_key = excluded.public_key,
+               key_proof = excluded.key_proof, key_proof_epoch = excluded.key_proof_epoch, created_at = excluded.created_at`,
+          ).run(accountId, body.lookupId, body.publicKey, body.proof, body.proofEpoch, now());
+          db.prepare("insert into grants (account_id, recipient_id, epoch, blob) values (?, ?, ?, ?)").run(
+            accountId,
+            RECOVERY,
+            body.epoch,
+            body.grant,
+          );
+        });
+        return c.json({ ok: true });
+      },
+    )
+
+    .get("/v1/recovery", (c) => {
+      const row = db.prepare("select created_at as createdAt from recovery where account_id = ?").get(c.var.device.account_id) as
+        | { createdAt: number }
+        | undefined;
+      return c.json({ recovery: row ?? null });
     })
 
     .get("/v1/collections", (c) => {

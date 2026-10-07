@@ -26,6 +26,7 @@ export function App() {
           <Alerts />
           <Collections />
           <Devices />
+          <RecoveryKey />
           <ThisBrowser />
         </>
       )}
@@ -46,6 +47,10 @@ function Onboarding() {
   const join = useAction((f: Record<string, string>) =>
     call("joinAccount", { serverUrl: f.serverUrl!, deviceName: f.deviceName!, code: f.code! }),
   );
+  const recover = useAction((f: Record<string, string>) =>
+    call("recoverAccount", { serverUrl: f.serverUrl!, deviceName: f.deviceName!, recoveryKey: f.recoveryKey! }),
+  );
+  const [recovering, setRecovering] = useState(false);
   const fields = (
     <>
       <label>
@@ -92,6 +97,30 @@ function Onboarding() {
           <ErrorText error={join.error} />
         </form>
       </div>
+      {recovering ? (
+        <form className="card stack" onSubmit={onSubmit(recover.run)}>
+          <h2>Recover with a recovery key</h2>
+          <p className="muted">Use this if none of your other browsers are available to pair with.</p>
+          {fields}
+          <label>
+            Recovery key
+            <textarea name="recoveryKey" required rows={2} autoComplete="off" spellCheck={false} className="code" />
+          </label>
+          <div className="row">
+            <button className="primary" disabled={recover.pending}>
+              {recover.pending ? "Recovering…" : "Recover"}
+            </button>
+            <ErrorText error={recover.error} />
+          </div>
+        </form>
+      ) : (
+        <p className="muted">
+          Lost access to your other browsers?{" "}
+          <button className="link" onClick={() => setRecovering(true)}>
+            Use a recovery key
+          </button>
+        </p>
+      )}
     </div>
   );
 }
@@ -379,6 +408,62 @@ function PairingCode({ pairing, onDone }: { pairing: { code: string; expiresAt: 
   );
 }
 
+function RecoveryKey() {
+  const [status, setStatus] = useState<{ createdAt: number } | null>();
+  const [shown, setShown] = useState<string>();
+  const load = useAction(async () => setStatus(await call("recoveryStatus")));
+  const create = useAction(async () => {
+    if (status && !confirm("Replace your recovery key? The old one stops working.")) return;
+    setShown(await call("createRecoveryKey"));
+    await load.run();
+  });
+  useEffect(() => void load.run(), []);
+
+  const download = (key: string) => {
+    const text = `BrowserLace recovery key\n\n${key}\n\nKeep this somewhere safe and private. Anyone with it and access to your server account can read your synced bookmarks and tabs.\n`;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    link.download = "browserlace-recovery-key.txt";
+    link.click();
+  };
+
+  return (
+    <section className="stack">
+      <h2>Recovery key</h2>
+      <div className="card stack">
+        <p className="muted">
+          Your encryption keys exist only on your devices. A recovery key lets you get back in if you lose all of them.
+          {status === null && " You don't have one yet."}
+          {status && ` Created ${timeAgo(status.createdAt)}.`}
+        </p>
+        {shown ? (
+          <Notice>
+            <p>Save this now. It won't be shown again.</p>
+            <span className="code">{shown}</span>
+            <div className="row">
+              <button className="ghost" onClick={() => void navigator.clipboard.writeText(shown)}>
+                Copy
+              </button>
+              <button className="ghost" onClick={() => download(shown)}>
+                Download
+              </button>
+              <span className="spacer" />
+              <button onClick={() => setShown(undefined)}>I've saved it</button>
+            </div>
+          </Notice>
+        ) : (
+          <div className="row">
+            <button className={status === null ? "primary" : ""} disabled={create.pending || status === undefined} onClick={() => create.run()}>
+              {status ? "Replace recovery key" : "Create recovery key"}
+            </button>
+            <ErrorText error={create.error ?? load.error} />
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ThisBrowser() {
   const config = useStored(configItem);
   const shareTabs = useStored(shareTabsItem);
@@ -408,10 +493,7 @@ function ThisBrowser() {
           />
           Share this browser's open tabs with my other devices
         </label>
-        <p className="muted">
-          Server: {config.serverUrl}. Keep at least one other device paired: your encryption key exists only on your
-          devices, so losing all of them means losing access to your synced data.
-        </p>
+        <p className="muted">Server: {config.serverUrl}</p>
         <div>
           <button className="danger" disabled={disconnect.pending} onClick={() => disconnect.run()}>
             Disconnect this browser

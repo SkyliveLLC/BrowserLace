@@ -37,8 +37,8 @@ async function randomEdit(browser: FakeBrowser, random: () => number, label: str
 
 it.each([1, 2, 3, 4, 5, 6, 7, 8])("three devices converge after random concurrent edits (seed %i)", async (seed) => {
   const random = rng(seed);
-  const { server, key } = await setup();
-  const devices = [new Device(server, key), new Device(server, key), new Device(server, key)];
+  const { server, keyring } = await setup();
+  const devices = [new Device(server, keyring), new Device(server, keyring), new Device(server, keyring)];
 
   for (let round = 0; round < 12; round++) {
     for (const [i, device] of devices.entries()) {
