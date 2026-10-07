@@ -61,71 +61,84 @@ function exclusive<T>(task: () => Promise<T>): Promise<T> {
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-async function session() {
+/**
+ * The signed-in config, API client and keyring. Pass `refresh` before sealing anything,
+ * so a rotation another device started is picked up first and nothing new goes out
+ * under a key a removed device has.
+ */
+async function session({ refresh = false } = {}) {
   const config = await configItem.getValue();
   if (!config) throw new Error("BrowserLace isn't set up on this browser yet");
-  return { config, api: createApi(config.serverUrl, config.token), keyring: await importKeyring(config.keyring) };
+  const api = createApi(config.serverUrl, config.token);
+  const keyring = refresh ? await refreshKeys(api, config) : await importKeyring(config.keyring);
+  // refreshKeys may have saved a newer keyring.
+  return { config: (await configItem.getValue()) ?? config, api, keyring };
 }
 
-/** Collections with their names decrypted. `name` is null when it can't be read. */
-async function fetchCollections(api: Api, keyring: Keyring) {
+async function readCollections(api: Api, keyring: Keyring): Promise<CollectionSummary[]> {
   const { collections } = await unwrap(api.v1.collections.$get());
   return Promise.all(
     collections.map(async ({ id, meta, headSeq }) => {
       const name = await open(keyring, meta, contexts.meta(id), collectionMeta)
         .then((m) => m.name)
-        .catch(() => null);
+        .catch(() => "(unreadable)");
       return { id, name, headSeq };
     }),
   );
 }
 
-async function readCollections(api: Api, keyring: Keyring): Promise<CollectionSummary[]> {
-  return (await fetchCollections(api, keyring)).map((c) => ({ ...c, name: c.name ?? "(unreadable)" }));
-}
-
 /**
  * Brings this device's keys up to date: takes keys other devices granted it, registers
  * its own public key if the server doesn't have it, and starts a new epoch when the
- * server says a device was removed. Returns the keyring to sync with.
+ * server says a device was removed (or `rotate` is set, so a removal rotates even if a
+ * server never raises the flag). Returns the keyring to sync with.
  */
-async function refreshKeys(api: Api, config: Config, retried = false): Promise<Keyring> {
-  let state = await unwrap(api.v1.keys.$get());
+async function refreshKeys(api: Api, config: Config, { rotate = false } = {}): Promise<Keyring> {
   const me = { id: config.deviceId, publicKey: config.deviceKey.publicKey, privateKey: await importPrivateKey(config.deviceKey.privateKey) };
   const save = async (stored: StoredKeyring) => {
     config = { ...config, keyring: stored };
     await configItem.setValue(config);
   };
-  const accepted = await acceptGrants(config.keyring, me, state.grants);
-  if (accepted !== config.keyring) await save(accepted);
-  let keyring = await importKeyring(config.keyring);
+  for (let attempt = 1; ; attempt++) {
+    let state = await unwrap(api.v1.keys.$get());
+    const accepted = await acceptGrants(config.keyring, me, state.grants);
+    if (accepted !== config.keyring) await save(accepted);
+    const keyring = await importKeyring(config.keyring);
 
-  if (!state.holders.some((h) => h.id === config.deviceId)) {
-    const proof = await attest(keyring, keyring.current, me.publicKey);
-    await unwrap(api.v1.devices.me.key.$put({ json: { publicKey: me.publicKey, proof, proofEpoch: keyring.current } }));
-    state = await unwrap(api.v1.keys.$get());
-  }
-  if (keyring.current < state.epoch) {
-    throw new Error("Waiting for one of your other devices to share new encryption keys. Open BrowserLace on a device that synced recently.");
-  }
-  if (!state.rotationNeeded) return keyring;
+    if (!state.holders.some((h) => h.id === config.deviceId)) {
+      const proof = await attest(keyring, keyring.current, me.publicKey);
+      await unwrap(api.v1.devices.me.key.$put({ json: { publicKey: me.publicKey, proof, proofEpoch: keyring.current } }));
+      state = await unwrap(api.v1.keys.$get());
+    }
+    if (keyring.current < state.epoch) {
+      throw new Error("Waiting for one of your other devices to share new encryption keys. Open BrowserLace on a device that synced recently.");
+    }
+    if (!state.rotationNeeded && !rotate) return keyring;
 
-  const rotation = await rotateKeys(keyring, state.holders);
-  const metas = await Promise.all(
-    (await fetchCollections(api, keyring)).flatMap(({ id, name }) =>
-      name === null ? [] : [seal(rotation.keyring, { v: 1, name }, contexts.meta(id)).then((meta) => ({ collectionId: id, meta }))],
-    ),
-  );
-  try {
-    await unwrap(api.v1.keys.$post({ json: { epoch: rotation.epoch, grants: rotation.grants, attestations: rotation.attestations, metas } }));
-  } catch (error) {
-    // Another device started the epoch first; take the key it granted us instead.
-    if (error instanceof ApiError && error.status === 409 && !retried) return refreshKeys(api, config, true);
-    throw error;
+    const rotation = await rotateKeys(keyring, state.holders);
+    const metas = await Promise.all(
+      (await unwrap(api.v1.collections.$get())).collections.map(async ({ id, meta }) => {
+        const name = await open(keyring, meta, contexts.meta(id), collectionMeta).catch(() => null);
+        return name && { collectionId: id, previous: meta, meta: await seal(rotation.keyring, name, contexts.meta(id)) };
+      }),
+    );
+    try {
+      await unwrap(
+        api.v1.keys.$post({
+          json: { epoch: rotation.epoch, grants: rotation.grants, attestations: rotation.attestations, metas: metas.filter((m) => m !== null) },
+        }),
+      );
+    } catch (error) {
+      // Another device started the epoch first, or a device registered meanwhile: look again.
+      if (error instanceof ApiError && error.status === 409 && attempt < 3) {
+        rotate = false;
+        continue;
+      }
+      throw error;
+    }
+    await save(rotation.keyring.stored);
+    return rotation.keyring;
   }
-  await save(rotation.keyring.stored);
-  keyring = rotation.keyring;
-  return keyring;
 }
 
 async function publishTabs(api: Api, keyring: Keyring, config: Config, force = false) {
@@ -148,8 +161,7 @@ async function syncAll(resolution?: Resolution) {
   if (!(await configItem.getValue())) return;
   await statusItem.setValue({ ...(await statusItem.getValue()), syncing: true });
   try {
-    const { config, api } = await session();
-    const keyring = await refreshKeys(api, config);
+    const { config, api, keyring } = await session({ refresh: true });
     const previous = await collectionsItem.getValue();
     const collections = await readCollections(api, keyring);
     await collectionsItem.setValue(collections);
@@ -256,7 +268,7 @@ export function schedulePublishTabs(delayMs = 3000) {
     () =>
       void exclusive(async () => {
         if (!(await configItem.getValue())) return;
-        const { config, api, keyring } = await session();
+        const { config, api, keyring } = await session({ refresh: true });
         await publishTabs(api, keyring, config).catch(() => {});
       }),
     delayMs,
@@ -326,18 +338,19 @@ export const handlers = {
       await saveConfig(input, await acceptGrants(null, identity, grants, identity.mac), device);
     }),
 
-  createPairingCode: async () => {
-    const { config, api } = await session();
-    const code = generatePairingCode();
-    const { expiresAt } = await unwrap(api.v1.pairings.$post({ json: await wrapKeyring(code, config.keyring) }));
-    return { code, expiresAt, serverUrl: config.serverUrl };
-  },
+  createPairingCode: () =>
+    exclusive(async () => {
+      const { config, api, keyring } = await session({ refresh: true });
+      const code = generatePairingCode();
+      const wrapped = await wrapKeyring(code, keyring.stored);
+      const { expiresAt } = await unwrap(api.v1.pairings.$post({ json: { ...wrapped, epoch: keyring.current } }));
+      return { code, expiresAt, serverUrl: config.serverUrl };
+    }),
 
   /** Creates (or replaces) the account's recovery key and returns it, to be shown once. */
   createRecoveryKey: () =>
     exclusive(async () => {
-      const { config, api } = await session();
-      const keyring = await refreshKeys(api, config);
+      const { api, keyring } = await session({ refresh: true });
       const recoveryKey = generateRecoveryKey();
       const { lookupId, publicKey, proof, proofEpoch, epoch, grant } = await recoverySetup(keyring, recoveryKey);
       await unwrap(api.v1.recovery.$put({ json: { lookupId, publicKey, proof, proofEpoch, epoch, grant } }));
@@ -351,7 +364,7 @@ export const handlers = {
 
   createCollection: (input: { name: string; folder: string | "new" | null; mode: MountMode }) =>
     exclusive(async () => {
-      const { api, keyring } = await session();
+      const { api, keyring } = await session({ refresh: true });
       const id = crypto.randomUUID();
       const meta = await seal(keyring, { v: 1, name: input.name }, contexts.meta(id));
       await unwrap(api.v1.collections.$post({ json: { id, meta } }));
@@ -361,7 +374,7 @@ export const handlers = {
 
   renameCollection: (input: { collectionId: string; name: string }) =>
     exclusive(async () => {
-      const { api, keyring } = await session();
+      const { api, keyring } = await session({ refresh: true });
       const meta = await seal(keyring, { v: 1, name: input.name }, contexts.meta(input.collectionId));
       await unwrap(api.v1.collections[":id"].$put({ param: { id: input.collectionId }, json: { meta } }));
       await syncAll();
@@ -418,7 +431,7 @@ export const handlers = {
   /** Undoes every change from `beforeSeq` on, as a new change. */
   restore: (input: { collectionId: string; beforeSeq: number }) =>
     exclusive(async () => {
-      const { api, keyring } = await session();
+      const { api, keyring } = await session({ refresh: true });
       await restoreCollection({ ...input, keyring, transport: transport(api) });
       await syncAll({ collectionId: input.collectionId, deletes: "allow" });
     }),
@@ -440,7 +453,7 @@ export const handlers = {
   setShareTabs: (input: { enabled: boolean }) =>
     exclusive(async () => {
       await shareTabsItem.setValue(input.enabled);
-      const { config, api, keyring } = await session();
+      const { config, api, keyring } = await session({ refresh: true });
       await publishTabs(api, keyring, config, true);
     }),
 
@@ -454,8 +467,9 @@ export const handlers = {
   /** Removes a device, then syncs so the account moves to a key the removed device doesn't have. */
   removeDevice: (input: { deviceId: string }) =>
     exclusive(async () => {
-      const { api } = await session();
+      const { config, api } = await session();
       await unwrap(api.v1.devices[":id"].$delete({ param: { id: input.deviceId } }));
+      await refreshKeys(api, config, { rotate: true });
       await syncAll();
     }),
 

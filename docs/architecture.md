@@ -97,19 +97,24 @@ and the model recreates the missing bookmarks).
   code or the keys. Pairings expire after 10 minutes and work once.
 - **Device keys.** Each device has an X25519 key pair and registers the public key with
   an **attestation**: an HMAC under an epoch key, which only account devices can make.
-- **Removing a device starts a new epoch.** The server flags the account, and the next
-  device to sync generates a key, wraps it for every remaining device whose attestation
-  checks out (ephemeral X25519 → HKDF → AES-GCM, a **grant**), re-attests them under the
-  new epoch and re-seals collection names. Each grant carries a proof under the previous
-  epoch, so a device only accepts keys an account device made. Only one device can start
-  an epoch; the others pick up its grants. Old changes stay under old epochs (the removed
-  device already had them); it can't read anything written afterwards. A device that
-  joins with an older keyring waits until another device starts an epoch that includes it.
+- **Removing a device starts a new epoch.** The removing device rotates right away (and
+  the server flags the account in case it can't). Rotating means generating a key,
+  wrapping it for every device attested under the *current* epoch (ephemeral X25519 →
+  HKDF → AES-GCM, a **grant**), re-attesting them under the new epoch and re-sealing
+  collection names. Trusting only current attestations means a removed device can't
+  vouch for anyone later, since every rotation re-attests the devices it trusts. Each
+  grant carries a proof under the previous epoch, so a device only accepts keys an
+  account device made. Only one device can start an epoch, and the server refuses one
+  that leaves out a currently attested device; the loser retries or picks up the grants.
+  Old changes stay under old epochs (the removed device already had them); it can't read
+  anything written afterwards. Pairing codes record their epoch and stop working after a
+  rotation, and devices refresh keys before sealing anything new.
 - **Recovery key.** 32 random bytes, shown once as Crockford base32. It acts as a device
   on paper: the bytes are an X25519 private key that receives grants like any device, and
   an HKDF-derived lookup id lets a new browser find the account and claim a device token.
   Its first grant (the whole keyring) is authenticated with a MAC derived from the
-  recovery key itself. Creating a new one replaces the old.
+  recovery key itself. Creating a new one replaces the old and starts a new epoch, since
+  the old one could still open the current epoch's grant.
 - **Tamper-evident logs.** Each change names the SHA-256 of the change before it (of the
   ciphertext, so an unreadable change still links the chain). A device that sees a
   change out of order, replayed or missing stops syncing that collection and says why.
@@ -119,9 +124,9 @@ The server sees: device names and browsers, public keys, when changes happen and
 they are, and which device wrote them. Nothing else.
 
 What a *malicious* server can still do: withhold the newest changes (a device can't tell
-"nothing new" from "hidden"), or show different devices different logs. And if it
-colludes with a removed device, it could slip in a device of its own between the removal
-and the next epoch; every device is listed in settings, so it would show there.
+"nothing new" from "hidden"), or show different devices different logs. A server colluding with a removed device could slip in a
+device of its own before the removal (while the removed device still had the current
+key); every device is listed in settings, so it would show there.
 
 ## Server (`apps/server`)
 

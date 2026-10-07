@@ -34,6 +34,11 @@ describe("key rotation", () => {
     expect(rotation.excluded).toEqual(["planted"]);
     expect(rotation.grants.map((g) => g.recipientId)).toEqual(["b"]);
 
+    // Attested only under an older epoch, which a removed device would also know: not trusted.
+    const epoch2 = await importKeyring(await acceptGrants(epoch1.stored, b.recipient, [{ epoch: 2, blob: rotation.grants[0]!.blob }]));
+    const stale = (await device("stale", epoch1)).holder;
+    expect((await rotateKeys(epoch2, [stale])).excluded).toEqual(["stale"]);
+
     const bKeyring = await importKeyring(await acceptGrants(epoch1.stored, b.recipient, [{ epoch: 2, blob: rotation.grants[0]!.blob }]));
     const blob = await seal(rotation.keyring, { v: 1, name: "After" }, "meta:x");
     expect(await open(bKeyring, blob, "meta:x", collectionMeta)).toEqual({ v: 1, name: "After" });

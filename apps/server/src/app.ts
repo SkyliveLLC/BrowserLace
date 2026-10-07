@@ -101,9 +101,14 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       (c) => {
         const { lookupId, ...info } = c.req.valid("json");
         const pairing = db
-          .prepare("delete from pairings where lookup_id = ? and expires_at > ? returning account_id, wrapped_key")
-          .get(lookupId, now()) as { account_id: string; wrapped_key: string } | undefined;
+          .prepare("delete from pairings where lookup_id = ? and expires_at > ? returning account_id, wrapped_key, key_epoch")
+          .get(lookupId, now()) as { account_id: string; wrapped_key: string; key_epoch: number } | undefined;
         if (!pairing) throw new HTTPException(404, { message: "Pairing code not found or expired" });
+        // The code wraps the keyring as it was; after a rotation the new device would be missing a key.
+        const account = db.prepare("select key_epoch from accounts where id = ?").get(pairing.account_id) as { key_epoch: number };
+        if (account.key_epoch !== pairing.key_epoch) {
+          throw new HTTPException(409, { message: "This pairing code was made before your account's keys changed. Create a new one." });
+        }
         return c.json({ ...issueDevice(pairing.account_id, info), wrappedKey: pairing.wrapped_key }, 201);
       },
     )
@@ -122,15 +127,19 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
 
     .use("/v1/*", auth)
 
-    .post("/v1/pairings", valid("json", z.object({ lookupId, wrappedKey: blob(1024) })), (c) => {
-      const { lookupId, wrappedKey } = c.req.valid("json");
+    .post("/v1/pairings", valid("json", z.object({ lookupId, wrappedKey: blob(65_536), epoch })), (c) => {
+      const { lookupId, wrappedKey, epoch } = c.req.valid("json");
+      const accountId = c.var.device.account_id;
+      const account = db.prepare("select key_epoch from accounts where id = ?").get(accountId) as { key_epoch: number };
+      if (account.key_epoch !== epoch) throw new HTTPException(409, { message: "Keys changed; sync and try again" });
       const expiresAt = now() + PAIRING_TTL_MS;
       db.prepare("delete from pairings where expires_at <= ?").run(now());
-      db.prepare("insert into pairings (lookup_id, account_id, wrapped_key, expires_at) values (?, ?, ?, ?)").run(
+      db.prepare("insert into pairings (lookup_id, account_id, wrapped_key, expires_at, key_epoch) values (?, ?, ?, ?, ?)").run(
         lookupId,
-        c.var.device.account_id,
+        accountId,
         wrappedKey,
         expiresAt,
+        epoch,
       );
       return c.json({ expiresAt }, 201);
     })
@@ -162,15 +171,18 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       return c.json({ ok: true });
     })
 
-    /** Registers this device's public key, once, with an attestation from the keyring. */
+    /**
+     * Registers this device's public key, once, attested under the current epoch. Rotations
+     * only trust current attestations, so an older one would never receive new keys.
+     */
     .put("/v1/devices/me/key", valid("json", z.object({ publicKey: key32, proof: key32, proofEpoch: epoch })), (c) => {
       const { publicKey, proof, proofEpoch } = c.req.valid("json");
+      const account = db.prepare("select key_epoch from accounts where id = ?").get(c.var.device.account_id) as { key_epoch: number };
+      if (account.key_epoch !== proofEpoch) throw new HTTPException(409, { message: "This device's keys are out of date. Pair it again." });
       const { changes } = db
         .prepare("update devices set public_key = ?, key_proof = ?, key_proof_epoch = ? where id = ? and public_key is null")
         .run(publicKey, proof, proofEpoch, c.var.device.id);
       if (changes === 0) throw new HTTPException(409, { message: "This device already has a key" });
-      // Paired with a keyring older than the account's: only a new epoch can include this device.
-      db.prepare("update accounts set rotation_needed = 1 where id = ? and key_epoch > ?").run(c.var.device.account_id, proofEpoch);
       return c.json({ ok: true });
     })
 
@@ -195,7 +207,11 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       return c.json({ epoch: account.key_epoch, rotationNeeded: account.rotation_needed === 1, grants, holders });
     })
 
-    /** Starts epoch `epoch`. Only one device can win; the rest get 409 and pick up the grants. */
+    /**
+     * Starts epoch `epoch`. Only one device can win; the rest get 409 and pick up the grants.
+     * Also 409 if it leaves out a holder attested under the current epoch (one that registered
+     * after the rotating device listed holders), so the rotation is retried with it included.
+     */
     .post(
       "/v1/keys",
       valid(
@@ -204,7 +220,8 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
           epoch: epoch.min(2),
           grants: z.array(z.object({ recipientId: z.string(), blob: grantBlob })).max(1000),
           attestations: z.array(z.object({ recipientId: z.string(), proof: key32 })).max(1000),
-          metas: z.array(z.object({ collectionId: z.uuid(), meta: blob(4096) })).max(10_000),
+          /** Collection names re-sealed under the new epoch. `previous` guards against overwriting a rename. */
+          metas: z.array(z.object({ collectionId: z.uuid(), meta: blob(4096), previous: blob(4096) })).max(10_000),
         }),
       ),
       (c) => {
@@ -215,6 +232,16 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
             .prepare("update accounts set key_epoch = ?, rotation_needed = 0 where id = ? and key_epoch = ?")
             .run(body.epoch, accountId, body.epoch - 1);
           if (changes === 0) throw new HTTPException(409, { message: "Another device already started a new epoch" });
+          const granted = new Set(body.grants.map((g) => g.recipientId));
+          const current = db
+            .prepare(
+              `select id from devices where account_id = ? and public_key is not null and key_proof_epoch = ?
+               union all select ? from recovery where account_id = ? and key_proof_epoch = ?`,
+            )
+            .all(accountId, body.epoch - 1, RECOVERY, accountId, body.epoch - 1) as { id: string }[];
+          if (current.some(({ id }) => !granted.has(id))) {
+            throw new HTTPException(409, { message: "A device registered during the rotation; retry" });
+          }
           const isHolder = (id: string) =>
             id === RECOVERY
               ? db.prepare("select 1 from recovery where account_id = ?").get(accountId) !== undefined
@@ -240,8 +267,13 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
               );
             }
           }
-          for (const { collectionId, meta } of body.metas) {
-            db.prepare("update collections set meta = ? where id = ? and account_id = ?").run(meta, collectionId, accountId);
+          for (const { collectionId, meta, previous } of body.metas) {
+            db.prepare("update collections set meta = ? where id = ? and account_id = ? and meta = ?").run(
+              meta,
+              collectionId,
+              accountId,
+              previous,
+            );
           }
         });
         return c.json({ ok: true });
@@ -258,7 +290,9 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
         transaction(db, () => {
           const account = db.prepare("select key_epoch from accounts where id = ?").get(accountId) as { key_epoch: number };
           if (account.key_epoch !== body.epoch) throw new HTTPException(409, { message: "Keys changed; sync and try again" });
-          db.prepare("delete from grants where account_id = ? and recipient_id = ?").run(accountId, RECOVERY);
+          const { changes: replaced } = db.prepare("delete from grants where account_id = ? and recipient_id = ?").run(accountId, RECOVERY);
+          // The old key can still open the current epoch's grant, so move on to a new epoch.
+          if (replaced > 0) db.prepare("update accounts set rotation_needed = 1 where id = ?").run(accountId);
           db.prepare(
             `insert into recovery (account_id, lookup_id, public_key, key_proof, key_proof_epoch, created_at) values (?, ?, ?, ?, ?, ?)
              on conflict (account_id) do update set lookup_id = excluded.lookup_id, public_key = excluded.public_key,

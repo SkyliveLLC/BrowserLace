@@ -54,6 +54,7 @@ const migrations = [
   alter table devices add column public_key text;
   alter table devices add column key_proof text;
   alter table devices add column key_proof_epoch integer;
+  alter table pairings add column key_epoch integer not null default 1;
   create table recovery (
     account_id text primary key references accounts(id) on delete cascade,
     lookup_id text not null unique,

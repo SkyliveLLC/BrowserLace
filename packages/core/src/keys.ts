@@ -133,9 +133,11 @@ export async function acceptGrants(
 export type KeyHolder = { id: string; publicKey: string; proof: string; proofEpoch: number };
 
 /**
- * Starts a new epoch: a fresh key, granted to every holder whose attestation checks out,
- * and re-attested under the new epoch. Holders that fail the check (planted by the
- * server) are left out and returned in `excluded`.
+ * Starts a new epoch: a fresh key, granted to every holder attested under the current
+ * epoch, and re-attested under the new one. Every rotation re-attests the holders it
+ * trusts, so honest holders are always current. Holders that fail the check (planted by
+ * the server, or attested only under an older epoch a removed device also knows) are
+ * left out and returned in `excluded`.
  */
 export async function rotateKeys(keyring: Keyring, holders: KeyHolder[]) {
   const epoch = keyring.current + 1;
@@ -145,7 +147,8 @@ export async function rotateKeys(keyring: Keyring, holders: KeyHolder[]) {
   const trusted: KeyHolder[] = [];
   const excluded: string[] = [];
   for (const holder of holders) {
-    const ok = await verifyAttestation(keyring, holder.proofEpoch, holder.publicKey, holder.proof);
+    const ok =
+      holder.proofEpoch === keyring.current && (await verifyAttestation(keyring, holder.proofEpoch, holder.publicKey, holder.proof));
     if (ok) trusted.push(holder);
     else excluded.push(holder.id);
   }

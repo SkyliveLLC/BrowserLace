@@ -34,7 +34,7 @@ describe("accounts and devices", () => {
   it("pairs a second device once, within the time limit", async () => {
     const { client, as, signup, advance } = setup();
     const first = await signup();
-    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped" } }, as(first.token));
+    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped", epoch: 1 } }, as(first.token));
 
     const claim = () => client.v1.pairings.claim.$post({ json: { lookupId: LOOKUP, name: "Safari", browser: "safari" } });
     const res = await claim();
@@ -46,7 +46,7 @@ describe("accounts and devices", () => {
     const me = await (await client.v1.me.$get({}, as(second.token))).json();
     expect(me.devices.map((d) => d.name)).toEqual(["Chrome on Mac", "Safari"]);
 
-    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "again" } }, as(first.token));
+    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "again", epoch: 1 } }, as(first.token));
     advance(11 * 60 * 1000);
     expect((await claim()).status).toBe(404);
   });
@@ -131,7 +131,7 @@ describe("keys", () => {
   it("asks for a new epoch after a device is removed, and lets only one device start it", async () => {
     const { client, as, signup } = setup();
     const first = await signup();
-    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped" } }, as(first.token));
+    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped", epoch: 1 } }, as(first.token));
     const second = await (await client.v1.pairings.claim.$post({ json: { lookupId: LOOKUP, name: "B", browser: "firefox" } })).json();
     for (const device of [first, second]) {
       await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 1 } }, as(device.token));
@@ -167,15 +167,37 @@ describe("keys", () => {
     });
   });
 
-  it("asks for a new epoch when a device joins with an older keyring", async () => {
+  it("only registers keys attested under the current epoch", async () => {
     const { client, as, signup } = setup();
     const first = await signup();
     await client.v1.keys.$post({ json: { epoch: 2, grants: [], attestations: [], metas: [] } }, as(first.token));
-    await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 1 } }, as(first.token));
+    const register = (proofEpoch: number) =>
+      client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch } }, as(first.token));
 
-    expect((await (await client.v1.keys.$get({}, as(first.token))).json()).rotationNeeded).toBe(true);
-    const again = await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 2 } }, as(first.token));
-    expect(again.status).toBe(409);
+    expect((await register(1)).status).toBe(409);
+    expect((await register(2)).status).toBe(200);
+    expect((await register(2)).status).toBe(409);
+  });
+
+  it("refuses a rotation that leaves out a current device", async () => {
+    const { client, as, signup } = setup();
+    const first = await signup();
+    await client.v1.devices.me.key.$put({ json: { publicKey: PUBLIC, proof: PROOF, proofEpoch: 1 } }, as(first.token));
+    const rotate = (grants: { recipientId: string; blob: string }[]) =>
+      client.v1.keys.$post({ json: { epoch: 2, grants, attestations: [], metas: [] } }, as(first.token));
+
+    expect((await rotate([])).status).toBe(409);
+    expect((await rotate([{ recipientId: first.deviceId, blob: GRANT }])).status).toBe(200);
+  });
+
+  it("won't redeem a pairing code made before a rotation", async () => {
+    const { client, as, signup } = setup();
+    const first = await signup();
+    await client.v1.pairings.$post({ json: { lookupId: LOOKUP, wrappedKey: "wrapped", epoch: 1 } }, as(first.token));
+    await client.v1.keys.$post({ json: { epoch: 2, grants: [], attestations: [], metas: [] } }, as(first.token));
+
+    const res = await client.v1.pairings.claim.$post({ json: { lookupId: LOOKUP, name: "Late", browser: "chrome" } });
+    expect(res.status).toBe(409);
   });
 
   it("lets a recovery key sign in a new device and hands it the recovery grants", async () => {
@@ -184,7 +206,10 @@ describe("keys", () => {
     const setRecovery = (lookupId: string) =>
       client.v1.recovery.$put({ json: { lookupId, publicKey: PUBLIC, proof: PROOF, proofEpoch: 1, epoch: 1, grant: GRANT } }, as(first.token));
     await setRecovery("r".repeat(43));
+    expect((await (await client.v1.keys.$get({}, as(first.token))).json()).rotationNeeded).toBe(false);
     await setRecovery(LOOKUP);
+    // The replaced key can still open the current epoch's grant.
+    expect((await (await client.v1.keys.$get({}, as(first.token))).json()).rotationNeeded).toBe(true);
 
     const claim = (lookupId: string) => client.v1.recovery.claim.$post({ json: { lookupId, name: "New", browser: "chrome" } });
     expect((await claim("r".repeat(43))).status).toBe(404);
