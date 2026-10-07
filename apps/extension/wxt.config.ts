@@ -1,5 +1,8 @@
 import { defineConfig } from "wxt";
 
+/** Must stay the same once published on addons.mozilla.org. */
+const firefoxAddonId = process.env.WXT_FIREFOX_ADDON_ID || "browserlace@browserlace.app";
+
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   imports: false,
@@ -12,7 +15,7 @@ export default defineConfig({
     ...(browser === "firefox" && {
       browser_specific_settings: {
         gecko: {
-          id: "browserlace@browserlace.app",
+          id: firefoxAddonId,
           // 140+ shows Firefox's built-in data consent prompt for the permissions below.
           strict_min_version: "140.0",
           data_collection_permissions: { required: ["bookmarksInfo", "browsingActivity"] },

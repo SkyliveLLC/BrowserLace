@@ -11,7 +11,7 @@
     "zip": "wxt zip && wxt zip -b firefox",
     "postinstall": "wxt prepare",
     "typecheck": "tsc",
-    "safari:xcode": "xcrun safari-web-extension-converter .output/safari-mv3 --project-location safari --app-name BrowserLace --bundle-identifier app.browserlace.BrowserLace --swift --no-open --no-prompt --force",
+    "safari:xcode": "xcrun safari-web-extension-converter .output/safari-mv3 --project-location safari --app-name BrowserLace --bundle-identifier ${SAFARI_BUNDLE_ID:-app.browserlace.BrowserLace} --swift --no-open --no-prompt --force",
     "icons": "node scripts/generate-icons.ts"
   },
   "dependencies": {
