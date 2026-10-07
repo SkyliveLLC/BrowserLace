@@ -1,0 +1,12 @@
+node_modules
+dist
+.output
+.wxt
+*.db
+*.db-*
+.env
+.env.*
+!.env.example
+coverage
+.DS_Store
+apps/extension/safari/
