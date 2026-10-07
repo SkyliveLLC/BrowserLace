@@ -158,6 +158,15 @@ clients authenticate with bearer tokens, not cookies.
 
 The extension imports the server's route types (`AppType`) for a fully typed client.
 
+**Billing** (`billing.ts`) is on only when Stripe is configured (the hosted service).
+Accounts are on `free` or `plus`, each with device, collection and storage limits (storage
+is the size of the account's encrypted changes and snapshots). Going over returns `402`.
+Upgrading goes through Stripe Checkout with the account id as the reference; webhooks are
+verified by signature, and since they can arrive out of order the server re-reads the
+subscription from Stripe and sets the plan from its current status. Deleting an account
+cancels its subscription first, then deletes everything (rows cascade from the account).
+Stripe sees the payment details people enter there; it never sees synced data.
+
 ## Extension (`apps/extension`)
 
 - `lib/engine.ts`: every state-changing action runs through one promise queue
@@ -180,6 +189,5 @@ The extension imports the server's route types (`AppType`) for a fully typed cli
 
 - History, passwords, cookies, extensions and settings sync.
 - Native Safari bookmarks (would need a macOS helper app using private APIs).
-- Rate limiting and billing on the server. `SIGNUP_TOKEN` gates signups for now.
 - Smarter folder matching on mount: a folder renamed in one browser before mounting comes
   through as a second folder (its bookmarks are still matched by URL, not duplicated).

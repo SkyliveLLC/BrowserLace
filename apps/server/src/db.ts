@@ -100,6 +100,13 @@ const migrations = [
   );
   alter table collections add column pruned_seq integer not null default 0;
   `,
+  `
+  alter table accounts add column plan text not null default 'free';
+  alter table accounts add column stripe_customer_id text;
+  alter table accounts add column stripe_subscription_id text;
+  alter table accounts add column subscription_status text;
+  create unique index accounts_stripe_customer on accounts(stripe_customer_id);
+  `,
 ];
 
 export type Database = DatabaseSync;

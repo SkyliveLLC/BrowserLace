@@ -596,6 +596,26 @@ export const handlers = {
       await syncAll();
     }),
 
+  account: async () => {
+    const { api } = await session();
+    return unwrap(api.v1.account.$get());
+  },
+
+  /** Opens Stripe's checkout (to upgrade) or customer portal (to manage) in a new tab. */
+  openBilling: async (input: { page: "checkout" | "portal" }) => {
+    const { api } = await session();
+    const { url } = await unwrap(input.page === "checkout" ? api.v1.billing.checkout.$post() : api.v1.billing.portal.$post());
+    await browser.tabs.create({ url });
+  },
+
+  /** Deletes the whole account on the server, for every device, then signs this browser out. */
+  deleteAccount: () =>
+    exclusive(async () => {
+      const { api } = await session();
+      await unwrap(api.v1.account.$delete());
+      await browser.storage.local.clear();
+    }),
+
   /** Signs this browser out and wipes local state. Bookmarks stay in the browser. */
   disconnect: () =>
     exclusive(async () => {

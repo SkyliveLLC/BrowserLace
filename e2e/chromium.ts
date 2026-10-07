@@ -230,6 +230,18 @@ try {
   await e.call("syncNow"); // Queued behind the apply's own sync.
   check("a new browser bootstraps from the snapshot", await e.bookmarks("Work"), await a.bookmarks("Work"));
 
+  // Account: plan and usage show on a server with billing; deleting signs out every device.
+  await e.page.reload();
+  const account = e.page.locator(".card", { has: e.page.getByRole("button", { name: "Delete account" }) });
+  await account.getByText("Free plan").waitFor();
+  check("usage shows the device count against the plan", await account.getByText(/of 10/).textContent(), "4 of 10");
+  await e.page.screenshot({ path: `${shots}/options-account.png`, fullPage: true });
+  e.page.once("dialog", (dialog) => void dialog.accept("DELETE"));
+  await account.getByRole("button", { name: "Delete account" }).click();
+  await e.page.getByRole("heading", { name: "First browser" }).waitFor();
+  await a.call("syncNow");
+  check("other devices are signed out after the account is deleted", ((await a.storage("status")) as { revoked?: boolean }).revoked, true);
+
   console.log(`screenshots in ${shots}`);
 } finally {
   for (const browser of browsers) await browser.context.close();

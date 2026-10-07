@@ -13,6 +13,7 @@ import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { planFor, type Billing, type Plan, type Plans, type SubscriptionState } from "./billing.ts";
 import { transaction, type Database } from "./db.ts";
 import { Events } from "./events.ts";
 
@@ -58,9 +59,53 @@ export type AppOptions = {
   signupToken?: string | undefined;
   now?: () => number;
   events?: Events;
+  /** Paid plans. Without it there's no billing UI and no limits (self-hosting). */
+  billing?: { provider: Billing; plans: Plans } | undefined;
 };
 
-export function createApp({ db, signupToken, now = Date.now, events = new Events() }: AppOptions) {
+export function createApp({ db, signupToken, now = Date.now, events = new Events(), billing }: AppOptions) {
+  const usage = (accountId: string) =>
+    db
+      .prepare(
+        `select
+           (select count(*) from devices where account_id = ?1) as devices,
+           (select count(*) from collections where account_id = ?1) as collections,
+           (select coalesce(sum(length(ch.blob)), 0) from changes ch join collections c on c.id = ch.collection_id where c.account_id = ?1)
+             + (select coalesce(sum(length(s.blob)), 0) from snapshots s join collections c on c.id = s.collection_id where c.account_id = ?1)
+             as storageBytes`,
+      )
+      .get(accountId) as { devices: number; collections: number; storageBytes: number };
+
+  const limitsFor = (accountId: string) => {
+    if (!billing) return null;
+    const { plan } = db.prepare("select plan from accounts where id = ?").get(accountId) as { plan: Plan };
+    return billing.plans[plan];
+  };
+
+  /** Throws 402 if adding to the account would go over its plan. */
+  const checkLimit = (accountId: string, adding: { devices?: number; collections?: number; storageBytes?: number }) => {
+    const limits = limitsFor(accountId);
+    if (!limits) return;
+    const used = usage(accountId);
+    const over =
+      (adding.devices && used.devices + adding.devices > limits.devices && `Your plan allows ${limits.devices} devices`) ||
+      (adding.collections && used.collections + adding.collections > limits.collections && `Your plan allows ${limits.collections} collections`) ||
+      (adding.storageBytes &&
+        used.storageBytes + adding.storageBytes > limits.storageBytes &&
+        `Your plan's ${Math.round(limits.storageBytes / 1024 / 1024)} MB of storage is full`);
+    if (over) throw new HTTPException(402, { message: `${over}. Upgrade in BrowserLace's settings.` });
+  };
+
+  const applySubscription = (state: SubscriptionState) => {
+    const plan = planFor(state.status);
+    const { changes } = db
+      .prepare(
+        `update accounts set stripe_customer_id = ?, stripe_subscription_id = ?, subscription_status = ?, plan = ?
+         where id = ? or (? is null and stripe_customer_id = ?)`,
+      )
+      .run(state.customerId, state.subscriptionId, state.status, plan, state.accountId ?? null, state.accountId ?? null, state.customerId);
+    if (changes === 0) console.warn(`Stripe subscription ${state.subscriptionId} matches no account`);
+  };
   const issueDevice = (accountId: string, info: z.output<typeof deviceInfo>) => {
     const id = randomUUID();
     const token = randomBytes(32).toString("base64url");
@@ -102,6 +147,28 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
     })
     .get("/healthz", (c) => c.json({ ok: true }))
 
+    /** Stripe's webhook. Verified by signature, so it sits outside device auth. */
+    .post("/billing/webhook", async (c) => {
+      if (!billing) throw new HTTPException(404, { message: "Billing is not enabled" });
+      const state = await billing.provider
+        .webhook(await c.req.text(), c.req.header("stripe-signature") ?? "")
+        .catch((error: unknown) => {
+          throw new HTTPException(400, { message: `Invalid webhook: ${error instanceof Error ? error.message : String(error)}` });
+        });
+      if (state) applySubscription(state);
+      return c.json({ received: true });
+    })
+
+    /** Where Stripe sends the browser back after checkout or the portal. */
+    .get("/billing/return", (c) =>
+      c.html(
+        `<!doctype html><meta name="viewport" content="width=device-width"><title>BrowserLace</title>
+         <body style="font:16px system-ui;max-width:32em;margin:15vh auto;padding:0 1em">
+         <h1>${c.req.query("done") ? "You're all set" : "No changes made"}</h1>
+         <p>${c.req.query("done") ? "Your BrowserLace plan is updated. " : ""}You can close this tab.</p>`,
+      ),
+    )
+
     .post("/v1/accounts", valid("json", deviceInfo.extend({ signupToken: z.string().optional() })), (c) => {
       const { signupToken: given, ...info } = c.req.valid("json");
       if (signupToken && given !== signupToken) throw new HTTPException(403, { message: "Signup token required" });
@@ -119,6 +186,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
           .prepare("delete from pairings where lookup_id = ? and expires_at > ? returning account_id, wrapped_key, key_epoch")
           .get(lookupId, now()) as { account_id: string; wrapped_key: string; key_epoch: number } | undefined;
         if (!pairing) throw new HTTPException(404, { message: "Pairing code not found or expired" });
+        checkLimit(pairing.account_id, { devices: 1 });
         // The code wraps the keyring as it was; after a rotation the new device would be missing a key.
         const account = db.prepare("select key_epoch from accounts where id = ?").get(pairing.account_id) as { key_epoch: number };
         if (account.key_epoch !== pairing.key_epoch) {
@@ -134,6 +202,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
         | { account_id: string }
         | undefined;
       if (!recovery) throw new HTTPException(404, { message: "No account uses that recovery key" });
+      checkLimit(recovery.account_id, { devices: 1 });
       const grants = db
         .prepare("select epoch, blob from grants where account_id = ? and recipient_id = ? order by epoch")
         .all(recovery.account_id, RECOVERY) as { epoch: number; blob: string }[];
@@ -184,6 +253,54 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
         epoch,
       );
       return c.json({ expiresAt }, 201);
+    })
+
+    /** Plan, usage and limits. `limits` is null on servers without billing. */
+    .get("/v1/account", (c) => {
+      const accountId = c.var.device.account_id;
+      const account = db.prepare("select plan, subscription_status as status, stripe_customer_id as customerId from accounts where id = ?").get(
+        accountId,
+      ) as { plan: Plan; status: string | null; customerId: string | null };
+      return c.json({
+        plan: account.plan,
+        status: account.status,
+        billingEnabled: billing !== undefined,
+        canManageBilling: account.customerId !== null,
+        limits: limitsFor(accountId),
+        usage: usage(accountId),
+      });
+    })
+
+    .post("/v1/billing/checkout", async (c) => {
+      if (!billing) throw new HTTPException(404, { message: "Billing is not enabled" });
+      const accountId = c.var.device.account_id;
+      const { customerId } = db.prepare("select stripe_customer_id as customerId from accounts where id = ?").get(accountId) as {
+        customerId: string | null;
+      };
+      return c.json({ url: await billing.provider.checkoutUrl({ accountId, customerId }) });
+    })
+
+    .post("/v1/billing/portal", async (c) => {
+      if (!billing) throw new HTTPException(404, { message: "Billing is not enabled" });
+      const { customerId } = db.prepare("select stripe_customer_id as customerId from accounts where id = ?").get(c.var.device.account_id) as {
+        customerId: string | null;
+      };
+      if (!customerId) throw new HTTPException(409, { message: "This account has no billing yet" });
+      return c.json({ url: await billing.provider.portalUrl(customerId) });
+    })
+
+    /** Deletes the account and everything in it, for every device, and ends any subscription. */
+    .delete("/v1/account", async (c) => {
+      const accountId = c.var.device.account_id;
+      const { subscriptionId, status } = db
+        .prepare("select stripe_subscription_id as subscriptionId, subscription_status as status from accounts where id = ?")
+        .get(accountId) as { subscriptionId: string | null; status: string | null };
+      // Cancel first: if Stripe fails, keep the account rather than keep billing a deleted one.
+      if (billing && subscriptionId && status !== "canceled") await billing.provider.cancel(subscriptionId);
+      const devices = db.prepare("select id from devices where account_id = ?").all(accountId) as { id: string }[];
+      db.prepare("delete from accounts where id = ?").run(accountId);
+      for (const { id } of devices) events.disconnect(accountId, id);
+      return c.json({ ok: true });
     })
 
     .get("/v1/me", (c) => {
@@ -375,6 +492,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
 
     .post("/v1/collections", valid("json", z.object({ id: z.uuid(), meta: blob(4096) })), (c) => {
       const { id, meta } = c.req.valid("json");
+      checkLimit(c.var.device.account_id, { collections: 1 });
       try {
         db.prepare("insert into collections (id, account_id, meta, created_at) values (?, ?, ?, ?)").run(
           id,
@@ -439,6 +557,7 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
         const { id } = c.req.valid("param");
         const { blob, head } = c.req.valid("json");
         ownCollection(c.var.device, id);
+        checkLimit(c.var.device.account_id, { storageBytes: blob.length });
         // One statement, so concurrent pushes can't claim the same seq. It only inserts when the
         // log still ends at `head`, so a client never appends on top of changes it hasn't seen.
         // A pruned log may be empty, so its end is at least the pruned watermark.
@@ -500,6 +619,8 @@ export function createApp({ db, signupToken, now = Date.now, events = new Events
         const { id } = c.req.valid("param");
         const { seq, blob } = c.req.valid("json");
         ownCollection(c.var.device, id);
+        const previous = db.prepare("select length(blob) as size from snapshots where collection_id = ?").get(id) as { size: number } | undefined;
+        checkLimit(c.var.device.account_id, { storageBytes: blob.length - (previous?.size ?? 0) });
         const { head } = db
           .prepare(
             `select max(coalesce(max(ch.seq), 0), c.pruned_seq) as head

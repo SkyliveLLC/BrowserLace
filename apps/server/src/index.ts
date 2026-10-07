@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { WebSocketServer } from "ws";
 import { createApp } from "./app.ts";
+import { plansFromEnv, stripeBilling } from "./billing.ts";
 import { openDatabase, pruneHistory } from "./db.ts";
 import { Events } from "./events.ts";
 
@@ -16,7 +17,22 @@ const prune = () => {
 };
 prune();
 const pruneTimer = setInterval(prune, 24 * 60 * 60 * 1000);
-const app = createApp({ db, events, signupToken: process.env.SIGNUP_TOKEN || undefined });
+const { STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, PUBLIC_URL } = process.env;
+// Billing (and plan limits) only when every Stripe setting is present: the hosted service, not self-hosting.
+const billing =
+  STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET && STRIPE_PRICE_ID && PUBLIC_URL
+    ? {
+        provider: stripeBilling({
+          secretKey: STRIPE_SECRET_KEY,
+          webhookSecret: STRIPE_WEBHOOK_SECRET,
+          priceId: STRIPE_PRICE_ID,
+          publicUrl: PUBLIC_URL.replace(/\/+$/, ""),
+        }),
+        plans: plansFromEnv(process.env),
+      }
+    : undefined;
+const app = createApp({ db, events, billing, signupToken: process.env.SIGNUP_TOKEN || undefined });
+if (billing) console.log("Billing enabled");
 
 const server = serve({ fetch: app.fetch, port, websocket: { server: new WebSocketServer({ noServer: true }) } }, ({ port }) => {
   console.log(`BrowserLace server listening on :${port}`);
