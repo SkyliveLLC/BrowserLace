@@ -29,6 +29,7 @@ export function App() {
           {hasBookmarksApi() && <Profiles />}
           <Devices />
           <RecoveryKey />
+          <Account />
           <ThisBrowser />
         </>
       )}
@@ -548,6 +549,75 @@ function RecoveryKey() {
             <ErrorText error={create.error ?? load.error} />
           </div>
         )}
+      </div>
+    </section>
+  );
+}
+
+type AccountInfo = Awaited<ReturnType<Handlers["account"]>>;
+
+const formatBytes = (bytes: number) => (bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
+
+/** Plan and usage (on servers with billing), and deleting the account. */
+function Account() {
+  const [account, setAccount] = useState<AccountInfo>();
+  const load = useAction(async () => setAccount(await call("account")));
+  const billing = useAction((page: "checkout" | "portal") => call("openBilling", { page }));
+  const remove = useAction(async () => {
+    const answer = prompt(
+      "This permanently deletes your synced collections, history, profiles and devices for every browser, and cancels any subscription. Bookmarks already in your browsers stay.\n\nType DELETE to confirm.",
+    );
+    if (answer === "DELETE") await call("deleteAccount");
+  });
+  useEffect(() => void load.run(), []);
+
+  const rows = account?.limits
+    ? ([
+        ["Devices", `${account.usage.devices} of ${account.limits.devices}`, account.usage.devices / account.limits.devices],
+        ["Collections", `${account.usage.collections} of ${account.limits.collections}`, account.usage.collections / account.limits.collections],
+        ["Storage", `${formatBytes(account.usage.storageBytes)} of ${formatBytes(account.limits.storageBytes)}`, account.usage.storageBytes / account.limits.storageBytes],
+      ] as const)
+    : [];
+
+  return (
+    <section className="stack">
+      <h2>Account</h2>
+      <div className="card stack">
+        {account?.billingEnabled && (
+          <>
+            <div className="row">
+              <h3>{account.plan === "plus" ? "Plus" : "Free"} plan</h3>
+              {account.status === "past_due" && <span className="tag">Payment due</span>}
+              <span className="spacer" />
+              {account.plan === "free" && (
+                <button className="primary" disabled={billing.pending} onClick={() => billing.run("checkout")}>
+                  Upgrade
+                </button>
+              )}
+              {account.canManageBilling && (
+                <button disabled={billing.pending} onClick={() => billing.run("portal")}>
+                  Manage billing
+                </button>
+              )}
+            </div>
+            {rows.map(([label, text, share]) => (
+              <label key={label} className="usage">
+                <span className="row">
+                  {label}
+                  <span className="spacer" />
+                  <span className="muted">{text}</span>
+                </span>
+                <meter min={0} max={1} high={0.9} value={Math.min(share, 1)} />
+              </label>
+            ))}
+          </>
+        )}
+        <ErrorText error={load.error ?? billing.error ?? remove.error} />
+        <div>
+          <button className="danger" disabled={remove.pending} onClick={() => remove.run()}>
+            Delete account
+          </button>
+        </div>
       </div>
     </section>
   );

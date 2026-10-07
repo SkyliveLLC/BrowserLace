@@ -17,7 +17,17 @@ export async function startServer(): Promise<{ url: string; stop: () => void }> 
   const port = 20000 + Math.floor(Math.random() * 20000);
   const child = spawn("node", ["apps/server/src/index.ts"], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), DATABASE_PATH: join(mkdtempSync(join(tmpdir(), "bl-db-")), "e2e.db") },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATABASE_PATH: join(mkdtempSync(join(tmpdir(), "bl-db-")), "e2e.db"),
+      // Billing on, so plans and limits show up. Nothing here calls Stripe.
+      STRIPE_SECRET_KEY: "sk_test_e2e",
+      STRIPE_WEBHOOK_SECRET: "whsec_e2e",
+      STRIPE_PRICE_ID: "price_e2e",
+      PUBLIC_URL: `http://localhost:${port}`,
+      FREE_DEVICES: "10",
+    },
     stdio: "inherit",
   });
   const url = `http://localhost:${port}`;

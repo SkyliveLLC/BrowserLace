@@ -105,6 +105,23 @@ docker build -f apps/server/Dockerfile -t browserlace-server .
 | `SIGNUP_TOKEN`  | unset                    | If set, creating an account requires it. Use it for invite-only servers. |
 | `HISTORY_DAYS`  | `365`                    | Changes older than this are dropped once a snapshot covers them; history and restore go back this far |
 
+### Billing (hosted service only)
+
+Billing and plan limits turn on only when all four Stripe settings are set. Without them
+(self-hosting) there are no limits and no billing UI.
+
+| Variable                | Meaning                                                                 |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY`     | Stripe API key                                                          |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret of the webhook endpoint `https://<server>/billing/webhook` |
+| `STRIPE_PRICE_ID`       | Recurring price for the Plus plan                                       |
+| `PUBLIC_URL`            | The server's public URL, where Stripe sends people back after checkout  |
+| `FREE_DEVICES`, `FREE_COLLECTIONS`, `FREE_STORAGE_MB` | Free plan limits (default 3, 5, 25)       |
+| `PLUS_DEVICES`, `PLUS_COLLECTIONS`, `PLUS_STORAGE_MB` | Plus plan limits (default 20, 200, 1024)  |
+
+The webhook needs the events `checkout.session.completed` and `customer.subscription.created`,
+`.updated` and `.deleted`. Enable the customer portal in Stripe so people can manage or cancel.
+
 Put it behind HTTPS (any reverse proxy) for the hosted service. To self-host privately on
 a tailnet, see [deploy/tailscale](deploy/tailscale/README.md).
 
