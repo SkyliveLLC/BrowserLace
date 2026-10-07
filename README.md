@@ -61,11 +61,28 @@ Safari extensions ship inside a native app: open `apps/extension/safari` in Xcod
 team for signing, and run the macOS (or iOS) scheme. For local testing, enable Safari →
 Settings → Developer → Allow unsigned extensions.
 
+Store identifiers are set at build time (in the environment or `apps/extension/.env`):
+
+| Variable                 | Default                        | Meaning                                                  |
+| ------------------------ | ------------------------------ | -------------------------------------------------------- |
+| `WXT_DEFAULT_SERVER_URL` | `http://localhost:8787`        | Server prefilled in the setup screen                     |
+| `WXT_FIREFOX_ADDON_ID`   | `browserlace@browserlace.app`  | Firefox add-on id. Never change it after the first AMO upload |
+| `SAFARI_BUNDLE_ID`       | `app.browserlace.BrowserLace`  | Bundle id of the Safari wrapper app (`safari:xcode`)     |
+
+### Releases
+
+CI runs typecheck, tests, builds, Mozilla's linter and a Docker smoke test on every PR.
+Pushing a tag that matches `apps/extension/package.json`'s version (e.g. `v0.2.0`)
+publishes a GitHub release with the Chrome and Firefox zips and pushes the server image to
+`ghcr.io/skylivellc/browserlace-server`. Set the repository variables `DEFAULT_SERVER_URL`
+and `FIREFOX_ADDON_ID` for store builds.
+
 ## Running the server
 
 ```sh
+docker run -p 8787:8787 -v browserlace:/data ghcr.io/skylivellc/browserlace-server
+# or build it yourself from the repo root:
 docker build -f apps/server/Dockerfile -t browserlace-server .
-docker run -p 8787:8787 -v browserlace:/data browserlace-server
 ```
 
 | Variable        | Default                  | Meaning                                                    |
