@@ -2,7 +2,7 @@
  * One sync pass for one collection: pull the log, push local edits from the mounted
  * folder (if any), pull again, then make the folder match the model.
  */
-import { hashBlob, open, seal, type Keyring } from "./crypto.ts";
+import { hashBlob, MissingKeyError, open, seal, type Keyring } from "./crypto.ts";
 import { applyOps, buildTree, diffModels, type Model, type NodeFields, type Op } from "./model.ts";
 import { changePayload, contexts } from "./payloads.ts";
 import {
@@ -75,11 +75,17 @@ export const openChange = (keyring: Keyring, collectionId: string, blob: string)
  * Replays changes into `model`, checking each one names the hash of the change before it.
  * A change that can't be read is skipped rather than blocking the collection forever;
  * every device skips the same one, so they still agree. It still counts for the chain.
+ * A change sealed under a key this device hasn't received yet throws `MissingKeyError`,
+ * which fails the whole sync without saving anything, so the change is retried later.
  */
 async function replay(model: Model, keyring: Keyring, collectionId: string, changes: Change[], lastHash: string) {
   let unreadable = 0;
   for (const change of changes) {
-    const payload = await openChange(keyring, collectionId, change.blob).catch(() => null);
+    // A key we don't have yet isn't "unreadable": stop, so the change is retried rather than skipped.
+    const payload = await openChange(keyring, collectionId, change.blob).catch((error: unknown) => {
+      if (error instanceof MissingKeyError) throw error;
+      return null;
+    });
     if (payload) {
       if (payload.prev !== lastHash) throw new TamperError(change.seq);
       applyOps(model, payload.ops);

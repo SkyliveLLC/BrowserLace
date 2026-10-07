@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { generateKey, importKeyring, MissingKeyError, mergeKeyring } from "./crypto.ts";
 import { restoreCollection, TamperError } from "./sync.ts";
 import { Device, setup } from "./testing.ts";
 
@@ -244,6 +245,17 @@ describe("syncCollection", () => {
     const log = server.logs.get("c1")!;
     log.push({ ...log[0]!, seq: 2 });
     await expect(b.sync()).rejects.toThrow(TamperError);
+  });
+
+  it("waits for a key it doesn't have yet instead of skipping the change", async () => {
+    const { server, keyring, a } = await pair();
+    const epoch2 = await importKeyring(mergeKeyring(keyring.stored, { 2: generateKey() }));
+    const b = new Device(server, epoch2);
+    await b.browser.add("root", "new key", "https://new.example");
+    await b.sync();
+
+    await expect(a.sync()).rejects.toThrow(MissingKeyError);
+    expect(a.collection.cursor).toBe(0);
   });
 
   it("adopts matching bookmarks instead of duplicating them on first mount", async () => {

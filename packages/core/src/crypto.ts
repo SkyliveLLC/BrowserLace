@@ -99,9 +99,17 @@ export async function importKeyring(stored: StoredKeyring): Promise<Keyring> {
 const VERSION = 2;
 const HEADER_BYTES = 5;
 
+/** A blob is sealed under an epoch this device hasn't received yet. Retry after the next key refresh. */
+export class MissingKeyError extends Error {
+  constructor(epoch: number) {
+    super(`This device doesn't have the key for epoch ${epoch} yet; it will retry after syncing keys`);
+    this.name = "MissingKeyError";
+  }
+}
+
 function epochKeys(keyring: Keyring, epoch: number): EpochKeys {
   const keys = keyring.epochs.get(epoch);
-  if (!keys) throw new Error(`No key for epoch ${epoch}; this device may need to sync first`);
+  if (!keys) throw new MissingKeyError(epoch);
   return keys;
 }
 
