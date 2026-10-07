@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createKeyring, importKeyring, open, seal } from "./crypto.ts";
-import { generatePairingCode, normalizePairingCode, pairingLookupId, unwrapKeyring, wrapKeyring } from "./pairing.ts";
+import {
+  generatePairingCode,
+  normalizePairingCode,
+  pairingLink,
+  pairingLookupId,
+  parsePairingInput,
+  unwrapKeyring,
+  wrapKeyring,
+} from "./pairing.ts";
 import { collectionMeta } from "./payloads.ts";
 
 describe("pairing", () => {
@@ -17,6 +25,12 @@ describe("pairing", () => {
   it("rejects the wrong code", async () => {
     const { wrappedKey } = await wrapKeyring(generatePairingCode(), createKeyring());
     await expect(unwrapKeyring(generatePairingCode(), wrappedKey)).rejects.toThrow();
+  });
+
+  it("reads a pairing link or a bare code", () => {
+    const link = pairingLink("https://bl.tail1234.ts.net", "ABCD-EFGH-JKMN-PQRS");
+    expect(parsePairingInput(` ${link} `)).toEqual({ code: "ABCD-EFGH-JKMN-PQRS", serverUrl: "https://bl.tail1234.ts.net" });
+    expect(parsePairingInput("abcd efgh jkmn pqrs")).toEqual({ code: "abcd efgh jkmn pqrs" });
   });
 
   it("normalizes look-alike characters and rejects malformed codes", () => {

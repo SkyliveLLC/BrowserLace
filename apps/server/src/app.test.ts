@@ -218,3 +218,21 @@ describe("keys", () => {
     expect(await res.json()).toMatchObject({ accountId: first.accountId, grants: [{ epoch: 1, blob: GRANT }] });
   });
 });
+
+describe("profiles", () => {
+  it("stores profiles per account and won't let another account overwrite one", async () => {
+    const { client, as, signup } = setup();
+    const owner = await signup();
+    const stranger = await signup();
+    const id = randomUUID();
+    const put = (token: string, blob: string) => client.v1.profiles[":id"].$put({ param: { id }, json: { blob } }, as(token));
+
+    expect((await put(owner.token, "v1")).status).toBe(200);
+    expect((await put(owner.token, "v2")).status).toBe(200);
+    expect((await put(stranger.token, "mine")).status).toBe(404);
+
+    const list = async (token: string) => (await (await client.v1.profiles.$get({}, as(token))).json()).profiles;
+    expect(await list(owner.token)).toEqual([expect.objectContaining({ id, blob: "v2" })]);
+    expect(await list(stranger.token)).toEqual([]);
+  });
+});

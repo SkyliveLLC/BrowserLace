@@ -74,7 +74,8 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
     if (!row) throw new HTTPException(404, { message: "Collection not found" });
   };
 
-  const collectionParam = valid("param", z.object({ id: z.uuid() }));
+  /** A `:id` path parameter. Collection and profile ids are client-generated UUIDs. */
+  const idParam = valid("param", z.object({ id: z.uuid() }));
 
   const app = new Hono<Env>()
     // Clients authenticate with bearer tokens, never cookies, so any origin may call us.
@@ -342,14 +343,14 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
       return c.json({ id }, 201);
     })
 
-    .put("/v1/collections/:id", collectionParam, valid("json", z.object({ meta: blob(4096) })), (c) => {
+    .put("/v1/collections/:id", idParam, valid("json", z.object({ meta: blob(4096) })), (c) => {
       const { id } = c.req.valid("param");
       ownCollection(c.var.device, id);
       db.prepare("update collections set meta = ? where id = ?").run(c.req.valid("json").meta, id);
       return c.json({ ok: true });
     })
 
-    .delete("/v1/collections/:id", collectionParam, (c) => {
+    .delete("/v1/collections/:id", idParam, (c) => {
       const { id } = c.req.valid("param");
       ownCollection(c.var.device, id);
       db.prepare("delete from collections where id = ?").run(id);
@@ -358,7 +359,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
 
     .get(
       "/v1/collections/:id/changes",
-      collectionParam,
+      idParam,
       valid("query", z.object({ after: z.coerce.number().int().min(0).default(0) })),
       (c) => {
         const { id } = c.req.valid("param");
@@ -380,7 +381,7 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
 
     .post(
       "/v1/collections/:id/changes",
-      collectionParam,
+      idParam,
       valid("json", z.object({ blob: blob(8_000_000), head: z.number().int().min(0) })),
       (c) => {
         const { id } = c.req.valid("param");
@@ -400,6 +401,31 @@ export function createApp({ db, signupToken, now = Date.now }: AppOptions) {
         return c.json({ seq: row.seq }, 201);
       },
     )
+
+    .get("/v1/profiles", (c) => {
+      const profiles = db
+        .prepare("select id, blob, updated_at as updatedAt from profiles where account_id = ? order by updated_at")
+        .all(c.var.device.account_id) as { id: string; blob: string; updatedAt: number }[];
+      return c.json({ profiles });
+    })
+
+    .put("/v1/profiles/:id", idParam, valid("json", z.object({ blob: blob(65_536) })), (c) => {
+      const { id } = c.req.valid("param");
+      const { changes } = db
+        .prepare(
+          `insert into profiles (id, account_id, blob, updated_at) values (?, ?, ?, ?)
+           on conflict (id) do update set blob = excluded.blob, updated_at = excluded.updated_at
+           where profiles.account_id = excluded.account_id`,
+        )
+        .run(id, c.var.device.account_id, c.req.valid("json").blob, now());
+      if (changes === 0) throw new HTTPException(404, { message: "Profile not found" });
+      return c.json({ ok: true });
+    })
+
+    .delete("/v1/profiles/:id", idParam, (c) => {
+      db.prepare("delete from profiles where id = ? and account_id = ?").run(c.req.valid("param").id, c.var.device.account_id);
+      return c.json({ ok: true });
+    })
 
     .get("/v1/tabs", (c) => {
       const tabs = db

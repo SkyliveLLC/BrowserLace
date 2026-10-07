@@ -35,10 +35,17 @@ async function randomEdit(browser: FakeBrowser, random: () => number, label: str
   }
 }
 
-it.each([1, 2, 3, 4, 5, 6, 7, 8])("three devices converge after random concurrent edits (seed %i)", async (seed) => {
+const seeds = [1, 2, 3, 4, 5, 6, 7, 8];
+const cases = [
+  ...seeds.map((seed) => ({ seed, modes: ["two-way", "two-way", "two-way"] as const })),
+  // With a send-only device, everyone ends up with its folder.
+  ...seeds.slice(0, 4).map((seed) => ({ seed, modes: ["two-way", "two-way", "send"] as const })),
+];
+
+it.each(cases)("three devices converge after random concurrent edits (seed $seed, $modes)", async ({ seed, modes }) => {
   const random = rng(seed);
   const { server, keyring } = await setup();
-  const devices = [new Device(server, keyring), new Device(server, keyring), new Device(server, keyring)];
+  const devices = modes.map((mode) => new Device(server, keyring, mode));
 
   for (let round = 0; round < 12; round++) {
     for (const [i, device] of devices.entries()) {

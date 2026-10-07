@@ -13,20 +13,43 @@ const launch = async (name: string) => {
 };
 
 /** Fills the onboarding card titled `heading` and submits it. */
-async function onboard(browser: Browser, heading: string, fields: Record<string, string>, submit: string) {
+async function onboard(browser: Browser, heading: string, fields: Record<string, string>, submit: string, { serverField = server.url } = {}) {
   const card = browser.page.locator("form", { has: browser.page.getByRole("heading", { name: heading }) });
-  await card.getByLabel("Server", { exact: true }).fill(server.url);
+  await card.getByLabel("Server", { exact: true }).fill(serverField);
   await card.getByLabel("Name for this browser").fill(browser.name);
   for (const [label, value] of Object.entries(fields)) await card.getByLabel(label, { exact: true }).fill(value);
   await card.getByRole("button", { name: submit }).click();
   await browser.page.getByRole("heading", { name: "Collections" }).waitFor();
 }
 
-async function pairWith(from: Browser, to: Browser) {
+/** Pairs `to` using `from`'s code, or its link (which carries the server URL itself). */
+async function pairWith(from: Browser, to: Browser, { link = false } = {}) {
   await from.page.getByRole("button", { name: "Pair a device" }).click();
   const code = (await from.page.locator(".code").first().textContent())!;
+  await from.page.getByRole("button", { name: "Copy link" }).waitFor();
+  const pairingLink = `browserlace://pair?${new URLSearchParams({ server: server.url, code })}`;
   await from.page.getByRole("button", { name: "Done" }).click();
-  await onboard(to, "Add this browser", { "Pairing code": code.toLowerCase() }, "Join");
+  await onboard(to, "Add this browser", { "Pairing code or link": link ? pairingLink : code.toLowerCase() }, "Join", {
+    serverField: link ? "http://wrong.invalid" : server.url,
+  });
+}
+
+async function mountNew(browser: Browser, collection: string, mode?: string) {
+  const card = browser.page.locator(".card", { has: browser.page.getByRole("heading", { name: collection, exact: true }) });
+  await card.getByRole("button", { name: "Sync to a folder" }).click();
+  if (mode) await card.getByLabel("Direction").selectOption(mode);
+  await card.getByRole("button", { name: "Sync this folder" }).click();
+  await card.getByText(/Syncs to/).waitFor();
+}
+
+async function bookmark(browser: Browser, folderTitle: string, title: string, url: string) {
+  await browser.page.evaluate(
+    async ([folderTitle, title, url]) => {
+      const [folder] = await chrome.bookmarks.search({ title: folderTitle });
+      await chrome.bookmarks.create({ parentId: folder!.id, title, url });
+    },
+    [folderTitle, title, url] as const,
+  );
 }
 
 const epochOf = async (browser: Browser) => ((await browser.storage("config")) as { keyring: { current: number } }).keyring.current;
@@ -58,10 +81,11 @@ try {
   // B joins with a pairing code and syncs "Work" into a new folder.
   await pairWith(a, b);
   await b.page.getByRole("heading", { name: "Work", exact: true }).waitFor();
-  await b.page.getByRole("button", { name: "Sync to a folder" }).click();
-  await b.page.getByRole("button", { name: "Sync this folder" }).click();
-  await b.page.getByText(/Syncs to/).waitFor();
+  await mountNew(b, "Work");
   check("B receives A's bookmarks", await b.bookmarks("Work"), await a.bookmarks("Work"));
+  await b.page.getByPlaceholder("Work laptop, Home…").fill("Laptop");
+  await b.page.getByRole("button", { name: "Save this browser's setup" }).click();
+  await b.page.getByRole("heading", { name: "Laptop" }).waitFor();
 
   // Concurrent edits: A reorders, B renames and adds into a subfolder.
   await a.page.evaluate(async () => {
@@ -113,15 +137,33 @@ try {
   await popup.getByText("Chromium B").waitFor();
   await popup.getByText("localhost").first().waitFor();
   await popup.screenshot({ path: `${shots}/popup-tabs.png` });
+  await popup.getByRole("button", { name: "Collections" }).click();
+  await popup.getByPlaceholder("Search bookmarks").fill("mozilla");
+  check("popup search finds a nested bookmark", await popup.locator(".item .title").allTextContents(), ["MDN"]);
   await popup.close();
 
+  // Send-only: A's folder is the source of truth for "Reading".
+  await a.page.getByPlaceholder("Work, Research, Recipes…").fill("Reading");
+  await a.page.locator("form", { hasText: "New collection" }).getByLabel("Direction").selectOption("send");
+  await a.page.getByRole("button", { name: "Create", exact: true }).click();
+  await a.page.getByRole("heading", { name: "Reading", exact: true }).waitFor();
+  await bookmark(a, "Reading", "R1", "https://r1.example/");
+  await a.call("syncNow");
+  await b.call("syncNow");
+  await mountNew(b, "Reading");
+  await bookmark(b, "Reading", "R2 from B", "https://r2.example/");
+  for (const browser of [b, a, b]) await browser.call("syncNow");
+  check("send-only folder is unchanged by B's edit", await a.bookmarks("Reading"), ["R1 https://r1.example/"]);
+  check("B's edit to a send-only collection is reverted", await b.bookmarks("Reading"), ["R1 https://r1.example/"]);
+
   // History renders restore points.
-  await a.page.getByRole("button", { name: "History" }).click();
+  await a.page.getByRole("button", { name: "History" }).first().click();
   await a.page.getByRole("button", { name: "Restore to before" }).first().waitFor();
 
   // Removing a device moves the account to a new key the removed device never gets.
   const c = await launch("Chromium C");
-  await pairWith(a, c);
+  await pairWith(a, c, { link: true });
+  check("C joins with a pairing link", ((await c.storage("config")) as { serverUrl: string }).serverUrl, server.url);
   await a.page.reload();
   const row = a.page.locator("li", { hasText: "Chromium C" });
   a.page.once("dialog", (dialog) => void dialog.accept());
@@ -145,9 +187,9 @@ try {
   await d.page.getByRole("button", { name: "Use a recovery key" }).click();
   await onboard(d, "Recover with a recovery key", { "Recovery key": recoveryKey.toLowerCase() }, "Recover");
   await d.page.getByRole("heading", { name: "Work", exact: true }).waitFor();
-  await d.page.getByRole("button", { name: "Sync to a folder" }).click();
-  await d.page.getByRole("button", { name: "Sync this folder" }).click();
-  await d.page.getByText(/Syncs to/).waitFor();
+  // D sets itself up from B's profile instead of picking folders.
+  await d.page.locator(".card", { hasText: "Laptop" }).getByRole("button", { name: "Apply here" }).click();
+  await d.page.getByRole("button", { name: "Applied" }).waitFor();
   check("D recovers every bookmark, including post-rotation ones", await d.bookmarks("Work"), await a.bookmarks("Work"));
   await d.page.screenshot({ path: `${shots}/options-recovered.png`, fullPage: true });
 

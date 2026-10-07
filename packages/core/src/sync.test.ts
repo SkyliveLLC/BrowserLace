@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { generateKey, importKeyring, MissingKeyError, mergeKeyring } from "./crypto.ts";
-import { restoreCollection, TamperError } from "./sync.ts";
+import { restoreCollection, TamperError, type MountMode } from "./sync.ts";
 import { Device, setup } from "./testing.ts";
 
-async function pair(mode: "two-way" | "receive" = "two-way") {
+async function pair(mode: MountMode = "two-way") {
   const { server, keyring } = await setup();
   return { server, keyring, a: new Device(server, keyring), b: new Device(server, keyring, mode) };
 }
@@ -256,6 +256,23 @@ describe("syncCollection", () => {
 
     await expect(a.sync()).rejects.toThrow(MissingKeyError);
     expect(a.collection.cursor).toBe(0);
+  });
+
+  it("send-only: the folder wins, and other devices' edits are reverted", async () => {
+    const { a, b } = await pair("send");
+    await b.browser.add("root", "Docs", "https://docs.example");
+    await b.sync();
+    await a.sync();
+
+    await a.browser.update(a.browser.find("Docs"), { title: "Renamed on A", url: "https://docs.example" });
+    await a.browser.add("root", "Added on A", "https://a.example");
+    await a.sync();
+    await b.browser.add("root", "Added on B", "https://b.example");
+    await b.sync();
+    await a.sync();
+
+    expect(b.browser.outline()).toEqual(["Docs https://docs.example", "Added on B https://b.example"]);
+    expect(a.browser.outline()).toEqual(b.browser.outline());
   });
 
   it("adopts matching bookmarks instead of duplicating them on first mount", async () => {

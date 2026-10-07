@@ -71,6 +71,15 @@ const migrations = [
     primary key (account_id, recipient_id, epoch)
   ) without rowid;
   `,
+  `
+  create table profiles (
+    id text primary key,
+    account_id text not null references accounts(id) on delete cascade,
+    blob text not null,
+    updated_at integer not null
+  );
+  create index profiles_account on profiles(account_id);
+  `,
 ];
 
 export type Database = DatabaseSync;

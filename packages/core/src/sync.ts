@@ -9,6 +9,7 @@ import {
   applyTree,
   countRemovals,
   diffLocal,
+  modelBaseline,
   readBaseline,
   type MountState,
   type NativeBookmarks,
@@ -40,7 +41,11 @@ export class TamperError extends Error {
   }
 }
 
-export type MountMode = "two-way" | "receive";
+/**
+ * `two-way` merges both ways. `receive` only applies the collection to the folder.
+ * `send` makes the collection match the folder and never writes to the folder.
+ */
+export type MountMode = "two-way" | "receive" | "send";
 export type Mount = { native: NativeBookmarks; folderId: string; mode: MountMode; state: MountState };
 
 /** Why a mount stopped short of applying changes. Resolved by the user. */
@@ -135,12 +140,21 @@ export async function syncCollection(input: {
   const root = await mount.native.getTree(mount.folderId);
   if (!root) return result({ mount: mount.state, paused: { reason: "folder-missing" } });
 
-  let local = diffLocal(root, mount.state, model);
+  // Send-only diffs against the model itself, so other devices' edits are reverted too.
+  // Links to nodes the model no longer shows (deleted elsewhere) are dropped, so they're re-created.
+  const diff = () => {
+    if (mount.mode !== "send") return diffLocal(root, mount.state, model);
+    const baseline = modelBaseline(buildTree(model));
+    const links = Object.fromEntries(Object.entries(mount.state.links).filter(([id]) => baseline[id]));
+    return diffLocal(root, { links, baseline }, model);
+  };
+  let local = diff();
   let pushed = 0;
-  for (let attempt = 1; mount.mode === "two-way"; attempt++) {
+  for (let attempt = 1; mount.mode !== "receive"; attempt++) {
     const ops = input.discardDeletes ? local.ops.filter((op) => op.set.deleted !== true) : local.ops;
     if (ops.length === 0) break;
-    if (!input.allowDeletes && !input.discardDeletes && needsConfirmation(local.deletes, Object.keys(mount.state.baseline).length)) {
+    const total = Object.keys(mount.mode === "send" ? modelBaseline(buildTree(model)) : mount.state.baseline).length;
+    if (!input.allowDeletes && !input.discardDeletes && needsConfirmation(local.deletes, total)) {
       return result({ mount: mount.state, paused: { reason: "local-deletes", count: local.deletes } });
     }
     const head = cursor;
@@ -152,7 +166,11 @@ export async function syncCollection(input: {
     }
     if (attempt === MAX_PUSH_ATTEMPTS) throw new Error("The collection kept changing during sync; will retry");
     // Another device pushed first: diff again so we can adopt what it just created.
-    local = diffLocal(root, mount.state, model);
+    local = diff();
+  }
+
+  if (mount.mode === "send") {
+    return result({ mount: { links: local.links, baseline: readBaseline(root, local.links, model) }, pushed });
   }
 
   const tree = buildTree(model);
