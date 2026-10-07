@@ -76,3 +76,8 @@ docker run -p 8787:8787 -v browserlace:/data browserlace-server
 
 Put it behind HTTPS (any reverse proxy) for the hosted service. To self-host privately on
 a tailnet, see [deploy/tailscale](deploy/tailscale/README.md).
+
+## License
+
+[AGPL-3.0](LICENSE). You can use, modify and self-host BrowserLace freely; if you offer a
+modified version as a hosted service, you must publish your changes under the same license.
