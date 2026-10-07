@@ -80,6 +80,17 @@ const migrations = [
   );
   create index profiles_account on profiles(account_id);
   `,
+  `
+  create table sends (
+    id text primary key,
+    account_id text not null references accounts(id) on delete cascade,
+    to_device_id text not null references devices(id) on delete cascade,
+    from_device_id text not null,
+    blob text not null,
+    created_at integer not null
+  );
+  create index sends_to on sends(to_device_id);
+  `,
 ];
 
 export type Database = DatabaseSync;
