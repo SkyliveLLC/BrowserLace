@@ -30,9 +30,9 @@ jobs:
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
           plugins: "code-review@claude-code-plugins"
           prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          # The plugin asks for Opus on its bug agents; this maps the opus alias to Sonnet to keep cost down.
-          settings: '{"env": {"ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-5-5"}}'
+          # Agents that ask for opus, sonnet or haiku all resolve to Haiku 5.5, so every run stays on Haiku.
+          settings: '{"env": {"ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-haiku-5-5", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-haiku-5-5", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5"}}'
           # --allowedTools must name the inline-comment tool, or the action never starts its MCP server.
           claude_args: |
-            --model claude-sonnet-5-5
+            --model claude-haiku-5-5
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
