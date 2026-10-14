@@ -30,8 +30,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
+      # Workaround for anthropics/claude-code-action#1901: the API answers "Credit balance is too low" to any request
+      # carrying the action's CLAUDE_CODE_ENTRYPOINT or CLAUDE_CODE_ACTION, so Claude Code runs through a wrapper that
+      # drops both. Remove this step and path_to_claude_code_executable once the issue is fixed.
+      - name: Install Claude Code without the action markers
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          printf '#!/bin/sh\nunset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ACTION\nexec "%s" "$@"\n' "$HOME/.local/bin/claude" > "$RUNNER_TEMP/claude"
+          chmod +x "$RUNNER_TEMP/claude"
       - uses: anthropics/claude-code-action@v1
         with:
+          path_to_claude_code_executable: ${{ runner.temp }}/claude
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Agents that ask for opus, sonnet or haiku all resolve to Haiku 5.5, so every run stays on Haiku.
           settings: '{"env": {"ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-haiku-5-5", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-haiku-5-5", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5"}}'
