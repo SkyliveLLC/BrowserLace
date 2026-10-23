@@ -8,6 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright-core";
 
+/** For scenarios that need a plain browser without the extension. */
+export { chromium };
+
 const root = new URL("..", import.meta.url).pathname;
 export const shots = mkdtempSync(join(tmpdir(), "bl-shots-"));
 

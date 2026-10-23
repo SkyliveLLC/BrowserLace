@@ -91,7 +91,8 @@ CI runs typecheck, tests, builds, Mozilla's linter and a Docker smoke test on ev
 Pushing a tag that matches `apps/extension/package.json`'s version (e.g. `v0.2.0`)
 publishes a GitHub release with the Chrome and Firefox zips and pushes the server image to
 `ghcr.io/skylivellc/browserlace-server`. Set the repository variables `DEFAULT_SERVER_URL`
-and `FIREFOX_ADDON_ID` for store builds.
+and `FIREFOX_ADDON_ID` for store builds. Listing text, privacy answers and screenshots for the
+Chrome Web Store are in [docs/store-listing.md](docs/store-listing.md).
 
 ## Running the server
 
