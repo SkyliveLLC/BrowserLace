@@ -36,7 +36,7 @@ COLLECTIONS, NOT EVERYTHING
 YOUR TABS, EVERYWHERE
 • See the tabs open on your other browsers from the toolbar, and open them here.
 • Send a tab to any device from the popup or the right-click menu. It opens there right away.
-• Changes reach your other open browsers within a second or two.
+• Changes reach your other open browsers within a few seconds.
 
 SAFE BY DEFAULT
 • Large deletions pause until you confirm them.

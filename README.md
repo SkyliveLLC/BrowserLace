@@ -23,7 +23,7 @@ it works and what's deliberately left out, [PRIVACY.md](PRIVACY.md) for what's s
 - **Other devices** in the toolbar popup shows each browser's open tabs, so you can pick
   up where you left off without merging every session together. **Send a tab** to any
   device from the popup or the right-click menu; it opens there right away.
-- Changes reach your other browsers within a second or two while they're open.
+- Changes reach your other browsers within a few seconds while they're open.
 - **Safety:** large deletions pause until you confirm, and every collection keeps a
   history you can restore from.
 - **Your keys, your devices:** removing a device rotates the encryption key so it can't
