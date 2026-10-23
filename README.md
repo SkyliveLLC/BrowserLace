@@ -23,7 +23,7 @@ it works and what's deliberately left out, [PRIVACY.md](PRIVACY.md) for what's s
 - **Other devices** in the toolbar popup shows each browser's open tabs, so you can pick
   up where you left off without merging every session together. **Send a tab** to any
   device from the popup or the right-click menu; it opens there right away.
-- Changes reach your other browsers within a second or two while they're open.
+- Changes reach your other browsers within a few seconds while they're open.
 - **Safety:** large deletions pause until you confirm, and every collection keeps a
   history you can restore from.
 - **Your keys, your devices:** removing a device rotates the encryption key so it can't
@@ -91,7 +91,8 @@ CI runs typecheck, tests, builds, Mozilla's linter and a Docker smoke test on ev
 Pushing a tag that matches `apps/extension/package.json`'s version (e.g. `v0.2.0`)
 publishes a GitHub release with the Chrome and Firefox zips and pushes the server image to
 `ghcr.io/skylivellc/browserlace-server`. Set the repository variables `DEFAULT_SERVER_URL`
-and `FIREFOX_ADDON_ID` for store builds.
+and `FIREFOX_ADDON_ID` for store builds. Listing text, privacy answers and screenshots for the
+Chrome Web Store are in [docs/store-listing.md](docs/store-listing.md).
 
 ## Running the server
 

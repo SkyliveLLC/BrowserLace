@@ -168,7 +168,8 @@ async function receiveSends(api: Api, keyring: Keyring, config: Config) {
       await browser.notifications
         ?.create(`send:${opened.id}`, {
           type: "basic",
-          iconUrl: browser.runtime.getURL("/icon/128.png"),
+          // 96.png is full-bleed; 128.png carries the store's 16px margin.
+          iconUrl: browser.runtime.getURL("/icon/96.png"),
           title: `Tab from ${names.get(send.fromDeviceId) ?? "another device"}`,
           message: tab.title || tab.url,
         })
