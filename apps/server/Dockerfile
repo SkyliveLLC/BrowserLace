@@ -1,5 +1,5 @@
 # Build from the repo root: docker build -f apps/server/Dockerfile .
-FROM node:24-slim AS build
+FROM node:24.22.1-slim AS build
 WORKDIR /repo
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -12,7 +12,8 @@ RUN pnpm --filter @browserlace/server build
 FROM litestream/litestream:0.5.17 AS litestream
 
 # The bundle has no dependencies beyond Node itself (SQLite is built into Node 24).
-FROM node:24-slim
+# Keep Node at 24.22.1 or later: older releases bundle a vulnerable Brotli (CVE-2026-111497).
+FROM node:24.22.1-slim
 WORKDIR /app
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY apps/server/litestream.yml /etc/litestream.yml
