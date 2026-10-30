@@ -7,6 +7,9 @@ browsers), Firefox and Safari. Everything is end-to-end encrypted: the server st
 ciphertext and never sees a URL, title or collection name. Use the hosted server, or run
 your own on your tailnet.
 
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/befekjdaekmeedlmboinkeeihpcbngdd).
+The store version connects to the hosted server, `https://browserlace.skylive.world`.
+
 Bookmarks and tabs only, by design. See [docs/architecture.md](docs/architecture.md) for how
 it works and what's deliberately left out, [PRIVACY.md](PRIVACY.md) for what's stored, and
 [SECURITY.md](SECURITY.md) to report a vulnerability.
@@ -131,8 +134,9 @@ The webhook needs the events `checkout.session.completed` and `customer.subscrip
 `.updated` and `.deleted`. Enable the customer portal in Stripe so people can manage or cancel.
 
 Put it behind HTTPS (any reverse proxy). To self-host privately on a tailnet, see
-[deploy/tailscale](deploy/tailscale/README.md). The hosted service runs on Fly.io with
-backups and billing; see [deploy/fly](deploy/fly/README.md).
+[deploy/tailscale](deploy/tailscale/README.md). To run a public server on Fly.io, see
+[deploy/fly](deploy/fly/README.md). The hosted service at `https://browserlace.skylive.world`
+runs on Coolify, with Litestream backups to Cloudflare R2.
 
 ## License
 

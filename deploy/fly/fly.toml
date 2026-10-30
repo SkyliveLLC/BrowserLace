@@ -1,4 +1,4 @@
-# The hosted BrowserLace server on Fly.io. See README.md in this folder before deploying.
+# A public BrowserLace server on Fly.io. See README.md in this folder before deploying.
 app = "browserlace"
 primary_region = "iad"
 

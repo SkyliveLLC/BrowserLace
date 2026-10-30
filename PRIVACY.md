@@ -44,5 +44,5 @@ Bookmarks already in your browsers are never deleted by any of these.
 
 ## Contact
 
-Questions or requests: open an issue at https://github.com/SkyliveLLC/BrowserLace or use
-the contact in [SECURITY.md](SECURITY.md) for anything private.
+Email infosl@skylive.world for questions, data requests or anything private. You can also
+open an issue at https://github.com/SkyliveLLC/BrowserLace.

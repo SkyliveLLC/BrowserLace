@@ -1,8 +1,8 @@
 # Hosting BrowserLace on Fly.io
 
-This is the setup for the hosted service: one machine, a volume for SQLite, continuous
-backups to object storage with Litestream, and Stripe billing. Self-hosting doesn't need
-any of this; see [../tailscale](../tailscale/README.md).
+A public BrowserLace server on Fly.io: one machine, a volume for SQLite, continuous backups
+to object storage with Litestream, and optional Stripe billing. A private server for your
+own devices doesn't need any of this; see [../tailscale](../tailscale/README.md).
 
 The server keeps its database, rate limits and live connections in one process, so run
 **exactly one machine**. Don't `fly scale count` above 1.
