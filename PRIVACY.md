@@ -29,7 +29,8 @@ devices and in your recovery key. It leaves your device only in encrypted form.
   BrowserLace never sees them.
 
 There's no advertising, analytics, tracking or selling of data, and no third parties
-besides Stripe for payments and the infrastructure provider hosting the server.
+besides Stripe for payments and the infrastructure providers hosting the server and its
+backups.
 
 ## Retention and deletion
 

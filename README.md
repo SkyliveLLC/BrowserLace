@@ -8,7 +8,8 @@ ciphertext and never sees a URL, title or collection name. Use the hosted server
 your own on your tailnet.
 
 Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/befekjdaekmeedlmboinkeeihpcbngdd).
-The store version connects to the hosted server, `https://browserlace.skylive.world`.
+The store version defaults to the hosted server, `https://browserlace.skylive.world`, and
+you can point it at your own.
 
 Bookmarks and tabs only, by design. See [docs/architecture.md](docs/architecture.md) for how
 it works and what's deliberately left out, [PRIVACY.md](PRIVACY.md) for what's stored, and
