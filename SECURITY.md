@@ -7,7 +7,8 @@ and can't do, is in [docs/architecture.md](docs/architecture.md#encryption-keys-
 
 Please report vulnerabilities privately through GitHub's
 [private vulnerability reporting](https://github.com/SkyliveLLC/BrowserLace/security/advisories/new)
-rather than in a public issue. Include steps to reproduce and the impact you see.
+or by email to infosl@skylive.world, rather than in a public issue. Include steps to
+reproduce and the impact you see.
 
 We'll acknowledge reports within 3 working days and keep you updated until a fix ships.
 We're happy to credit you in the release notes.

@@ -29,7 +29,8 @@ devices and in your recovery key. It leaves your device only in encrypted form.
   BrowserLace never sees them.
 
 There's no advertising, analytics, tracking or selling of data, and no third parties
-besides Stripe for payments and the infrastructure provider hosting the server.
+besides Stripe for payments and the infrastructure providers hosting the server and its
+backups.
 
 ## Retention and deletion
 
@@ -44,5 +45,5 @@ Bookmarks already in your browsers are never deleted by any of these.
 
 ## Contact
 
-Questions or requests: open an issue at https://github.com/SkyliveLLC/BrowserLace or use
-the contact in [SECURITY.md](SECURITY.md) for anything private.
+Email infosl@skylive.world for questions, data requests or anything private. You can also
+open an issue at https://github.com/SkyliveLLC/BrowserLace.
